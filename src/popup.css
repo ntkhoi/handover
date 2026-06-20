@@ -54,7 +54,9 @@ h1 { font-size: 14px; margin: 0 0 8px; }
 .btn:hover { border-color: var(--accent); }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn.small { padding: 3px 8px; font-size: 11px; }
-#refresh { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.btn.primary:hover { background: #2860e0; }
+[hidden] { display: none !important; }
 
 .status { padding: 10px 14px; color: var(--muted); }
 .status.error { color: #d83931; }
@@ -96,13 +98,24 @@ input.month {
 #handover { padding: 4px 14px 0; }
 .sec-title { font-size: 13px; font-weight: 600; margin: 8px 0 6px; }
 .sec-title .btn { float: right; }
-.pivotwrap { overflow: auto; max-height: 320px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
-table.pivot { border-collapse: collapse; font-size: 12px; white-space: nowrap; }
-table.pivot th, table.pivot td { padding: 4px 8px; border: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; }
-table.pivot th { position: sticky; top: 0; background: #f7f8fa; }
-table.pivot td.d, table.pivot th.d { position: sticky; left: 0; background: #fff; text-align: left; }
-table.pivot th.d { background: #f7f8fa; z-index: 1; }
-table.pivot tr.tot td { background: #eef3ff; font-weight: 600; }
+.legend { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 8px; font-size: 11px; color: var(--muted); }
+.legend:empty { display: none; }
+.legend .lg { display: inline-flex; align-items: center; gap: 4px; }
+.legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; border: 1px solid rgba(0,0,0,.08); }
+.pivotwrap { overflow: auto; max-height: 360px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
+table.pivot { border-collapse: separate; border-spacing: 0; font-size: 12px; white-space: nowrap; }
+table.pivot th, table.pivot td { padding: 4px 8px; border-right: 1px solid #eef0f2; border-bottom: 1px solid #eef0f2; text-align: right; font-variant-numeric: tabular-nums; }
+table.pivot thead th { position: sticky; font-weight: 600; }
+table.pivot tr.grouprow th { top: 0; z-index: 4; text-align: center; font-weight: 700; }
+table.pivot tr.stagerow th { top: 25px; z-index: 3; text-align: center; background: #f7f8fa; }
+table.pivot td.d, table.pivot th.d { position: sticky; left: 0; background: #fff; text-align: left; font-weight: 600; }
+table.pivot tr.grouprow th.d { top: 0; z-index: 6; background: #eef0f2; }
+table.pivot td.d { z-index: 2; }
+table.pivot tbody td { background: #fff; }
+table.pivot tr.tot td { background: #eef3ff; font-weight: 700; }
+table.pivot tr.tot td.d { background: #eef3ff; }
+table.pivot tr.special td { background: #fff7e6; font-weight: 600; }
+table.pivot tr.special td.d { background: #fff7e6; }
 
 #report { padding: 4px 14px 14px; }
 

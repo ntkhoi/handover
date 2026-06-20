@@ -8,14 +8,15 @@
 </head>
 <body>
   <header>
-    <h1>Lark Base Analytics</h1>
+    <h1 id="title">Lark Base Analytics</h1>
     <div class="actions">
-      <button id="openPanel" class="btn">Open report on page</button>
+      <button id="openFull" class="btn primary" disabled>⛶ Open full view</button>
+      <button id="openPanel" class="btn">Open panel on page</button>
       <button id="refresh" class="btn">Refresh</button>
-      <button id="exportHtml" class="btn" disabled>Export HTML</button>
-      <button id="exportCsv" class="btn" disabled>Export CSV</button>
+      <button id="exportHtml" class="btn" disabled hidden>Export HTML</button>
+      <button id="exportCsv" class="btn" disabled hidden>Export CSV</button>
     </div>
-    <input id="filter" class="filter" type="text" placeholder="Filter columns by name…" />
+    <input id="filter" class="filter" type="text" placeholder="Filter columns by name…" hidden />
   </header>
 
   <div id="status" class="status"></div>

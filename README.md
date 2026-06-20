@@ -21,12 +21,15 @@ machine; the page and your data are never modified.
 
 1. Open your Lark Base table. **Reload the tab once** after installing so the
    network hook is active from page load.
-2. A **📊 Base Report** button appears bottom-right and the panel auto-opens once
+2. A **📊 Productivity** button appears bottom-right and the panel auto-opens once
    the data has loaded (a couple of seconds for large tables).
-3. In the panel you can **filter columns by name** and **export** the report as
-   **HTML** or **CSV**.
-4. Clicking the toolbar icon opens the same report in a popup (handy if the
-   on-page panel is closed).
+3. On the **translation work-log** table the panel is **pivot-focused**: it shows
+   the colored Translator-productivity pivot with a month-range picker and buttons
+   to **⬇ Load all rows**, **⛶ Open full view**, **⬇ Excel**, **CSV**, and **📋 Copy**.
+   On any other table it falls back to the generic per-column analytics (filter +
+   field cards + HTML/CSV/Raw-CSV export).
+4. Clicking the toolbar icon opens the same view in a popup (handy if the on-page
+   panel is closed).
 
 ## What it reports
 
@@ -72,8 +75,22 @@ When the open table contains the fields **Translator**, **Proofreader**,
   Translator's *Translate* and its Proofreader's *Proofread*; `#UI Review Word
   Count` is added to the UI Reviewer's *Haibao*.
 
-Export it with **Export pivot CSV**. Note: this lives in the *translation work-log*
-table — not the request-system table — so open that table for the pivot to appear.
+Each **person** gets a consistent pastel color band across their Translate /
+Proofread / Haibao columns, with a two-row grouped header (person name over stage).
+
+Reviewing & exporting the pivot:
+
+- **⛶ Open full view** opens the complete, colored pivot in a **new browser tab** —
+  a full-screen, scrollable page (sticky header + first column) with a **🖨 Print /
+  Save as PDF** button and self-contained **Excel** + **CSV** download links.
+- **⬇ Excel** downloads a real **`.xlsx`** styled like the handover sheet: per-person
+  colored headers, merged person bands, frozen header rows + date column, thousands
+  separators, and a highlighted Total / Task-Canceled / Task-in-progress / Banner row.
+  (Built in-browser with a tiny dependency-free OOXML writer — no upload, no library.)
+- **CSV** / **📋 Copy** export the same grid as CSV / tab-separated text.
+
+Note: the pivot lives in the *translation work-log* table — not the request-system
+table — so open that table for it to appear.
 
 ## Limitations
 

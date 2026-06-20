@@ -150,6 +150,7 @@
     if (msg.type === "GET_ANALYSIS") sendResponse({ analysis: lastAnalysis, handover: lastHandover, url: location.href });
     else if (msg.type === "SET_HANDOVER_RANGE") { handoverRange = msg.range || null; recomputeHandover(); sendResponse({ handover: lastHandover }); }
     else if (msg.type === "OPEN_PANEL") { ensureUI(); openPanel(); sendResponse({ ok: !!lastAnalysis }); }
+    else if (msg.type === "OPEN_FULL_PIVOT") { openFullPivot(); sendResponse({ ok: !!lastHandover }); }
     else if (msg.type === "CLEAR") {
       lastAnalysis = null; state = { fieldMap: null, userMap: null, recordMap: null, order: null };
       try { chrome.storage.local.remove("larkAnalysis"); } catch (e) {}
@@ -174,7 +175,10 @@
     ".meta{color:#646a73;font-size:11px;margin-bottom:8px}" +
     ".row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}" +
     ".btn{border:1px solid #e5e6eb;background:#f2f3f5;border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer}" +
-    ".btn:hover{border-color:#3370ff}" +
+    ".btn:hover{border-color:#3370ff}.btn.small{padding:3px 8px;font-size:11px}" +
+    ".btn.primary{background:#3370ff;color:#fff;border-color:#3370ff}.btn.primary:hover{background:#2860e0}" +
+    ".toolbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.toolbar:empty{display:none}" +
+    ".legend{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 8px;font-size:11px;color:#646a73}.legend:empty{display:none}.legend .lg{display:inline-flex;align-items:center;gap:4px}.legend i{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid rgba(0,0,0,.08)}" +
     "input.filter{flex:1;min-width:120px;border:1px solid #e5e6eb;border-radius:6px;padding:5px 8px;font-size:12px}" +
     ".body{overflow-y:auto;padding:10px 14px;flex:1}" +
     ".summary{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}" +
@@ -188,9 +192,17 @@
     ".rangebar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:10px}.rangebar:empty{display:none}" +
     ".rangebar label{display:flex;gap:4px;align-items:center;color:#646a73}.rangebar .rangebar-label{font-weight:600;color:#1f2329}.rangebar .arrow{color:#646a73}" +
     "input.month{border:1px solid #e5e6eb;border-radius:6px;padding:4px 6px;font-size:12px;color:#1f2329}" +
-    ".pivotwrap{overflow:auto;max-height:46vh;border:1px solid #e5e6eb;border-radius:8px;margin-bottom:10px}" +
-    "table.pivot{border-collapse:collapse;font-size:12px;white-space:nowrap}table.pivot th,table.pivot td{padding:4px 8px;border:1px solid #eee;text-align:right;font-variant-numeric:tabular-nums}" +
-    "table.pivot th{position:sticky;top:0;background:#f7f8fa;font-weight:600}table.pivot td.d,table.pivot th.d{position:sticky;left:0;background:#fff;text-align:left;font-weight:500}table.pivot tr.tot td{background:#eef3ff;font-weight:600}table.pivot th.d{z-index:1;background:#f7f8fa}" +
+    ".pivotwrap{overflow:auto;max-height:62vh;border:1px solid #e5e6eb;border-radius:8px;margin-bottom:10px}.panel.wide .pivotwrap{max-height:78vh}" +
+    "table.pivot{border-collapse:separate;border-spacing:0;font-size:12px;white-space:nowrap}" +
+    "table.pivot th,table.pivot td{padding:4px 8px;border-right:1px solid #eef0f2;border-bottom:1px solid #eef0f2;text-align:right;font-variant-numeric:tabular-nums}" +
+    "table.pivot thead th{position:sticky;font-weight:600}" +
+    "table.pivot tr.grouprow th{top:0;z-index:4;text-align:center;font-weight:700}" +
+    "table.pivot tr.stagerow th{top:25px;z-index:3;text-align:center;background:#f7f8fa}" +
+    "table.pivot td.d,table.pivot th.d{position:sticky;left:0;text-align:left;font-weight:600;background:#fff}" +
+    "table.pivot tr.grouprow th.d{top:0;z-index:6;background:#eef0f2}table.pivot td.d{z-index:2}" +
+    "table.pivot tbody td{background:#fff}" +
+    "table.pivot tr.tot td{background:#eef3ff;font-weight:700}table.pivot tr.tot td.d{background:#eef3ff}" +
+    "table.pivot tr.special td{background:#fff7e6;font-weight:600}table.pivot tr.special td.d{background:#fff7e6}" +
     "hr{border:none;border-top:1px solid #e5e6eb;margin:12px 0}";
 
   function ensureUI() {
@@ -200,23 +212,21 @@
     var shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML =
       "<style>" + STYLE + "</style>" +
-      '<button class="fab" id="fab">📊 Base Report</button>' +
+      '<button class="fab" id="fab">📊 Productivity</button>' +
       '<div class="panel" id="panel">' +
       '  <div class="hd">' +
-      '    <h2>Lark Base Analytics <button class="x" id="close">×</button></h2>' +
+      '    <h2><span id="title">Lark Base Analytics</span> <button class="x" id="close">×</button></h2>' +
       '    <div class="meta" id="meta">Waiting for data…</div>' +
-      '    <div class="row">' +
-      '      <input class="filter" id="filter" placeholder="Filter columns by name…" />' +
-      '      <button class="btn" id="loadAll">⬇ Load all rows</button>' +
-      '      <button class="btn" id="expand">⛶ Expand</button>' +
-      '      <button class="btn" id="expHtml">HTML</button>' +
-      '      <button class="btn" id="expCsv">CSV</button>' +
-      '      <button class="btn" id="expRaw">Raw CSV</button>' +
-      "    </div>" +
       '    <div class="meta" id="status"></div>' +
-      '    <div class="summary" id="summary"></div>' +
+      '    <div id="rangeBar" class="rangebar"></div>' +
+      '    <div id="toolbar" class="toolbar"></div>' +
       "  </div>" +
-      '  <div class="body"><div id="rangeBar" class="rangebar"></div><div id="handover"></div><div id="fields"></div></div>' +
+      '  <div class="body">' +
+      '    <div id="legend" class="legend"></div>' +
+      '    <div id="handover"></div>' +
+      '    <div id="summary" class="summary"></div>' +
+      '    <div id="fields"></div>' +
+      "  </div>" +
       "</div>";
     (document.body || document.documentElement).appendChild(host);
 
@@ -224,29 +234,48 @@
       host: host, shadow: shadow,
       panel: shadow.getElementById("panel"),
       fab: shadow.getElementById("fab"),
+      title: shadow.getElementById("title"),
       summary: shadow.getElementById("summary"),
       rangeBar: shadow.getElementById("rangeBar"),
+      toolbar: shadow.getElementById("toolbar"),
+      legend: shadow.getElementById("legend"),
       handover: shadow.getElementById("handover"),
       fields: shadow.getElementById("fields"),
       meta: shadow.getElementById("meta"),
       status: shadow.getElementById("status")
     };
-    shadow.getElementById("loadAll").addEventListener("click", loadAllRecords);
-    shadow.getElementById("expand").addEventListener("click", function () { ui.panel.classList.toggle("wide"); });
     ui.fab.addEventListener("click", openPanel);
     shadow.getElementById("close").addEventListener("click", closePanel);
-    shadow.getElementById("filter").addEventListener("input", function (e) {
-      filterText = e.target.value;
-      if (lastAnalysis) ui.fields.innerHTML = LarkCore.renderFields(lastAnalysis, filterText);
+
+    // Delegated handlers — the toolbar/pivot are re-rendered on each compute, so we
+    // listen on the stable panel element and dispatch by data-act / control id.
+    ui.panel.addEventListener("click", function (e) {
+      var t = e.target;
+      var act = t && t.getAttribute && t.getAttribute("data-act");
+      if (t && t.id === "hvReset") { handoverRange = null; recomputeHandover(); return; }
+      if (!act) return;
+      if (act === "loadAll") loadAllRecords();
+      else if (act === "expand") ui.panel.classList.toggle("wide");
+      else if (act === "openFull") openFullPivot();
+      else if (act === "excel") { if (lastHandover) downloadBlob("handover-pivot-" + stamp() + ".xlsx", LarkCore.buildHandoverXLSX(lastHandover)); }
+      else if (act === "csv") { if (lastHandover) download("handover-pivot-" + stamp() + ".csv", LarkCore.buildHandoverCSV(lastHandover), "text/csv"); }
+      else if (act === "copy") { if (lastHandover) copyText(LarkCore.buildHandoverTSV(lastHandover), t); }
+      else if (act === "repHtml") { if (lastAnalysis) download("lark-base-report-" + stamp() + ".html", LarkCore.buildReportHTML(lastAnalysis), "text/html"); }
+      else if (act === "repCsv") { if (lastAnalysis) download("lark-base-report-" + stamp() + ".csv", LarkCore.buildReportCSV(lastAnalysis), "text/csv"); }
+      else if (act === "rawCsv") { if (lastDataset) download("lark-base-rawdata-" + stamp() + ".csv", LarkCore.buildRawCSV(lastDataset), "text/csv"); }
     });
-    shadow.getElementById("expHtml").addEventListener("click", function () {
-      if (lastAnalysis) download("lark-base-report-" + stamp() + ".html", LarkCore.buildReportHTML(lastAnalysis), "text/html");
+    ui.panel.addEventListener("change", function (e) {
+      if (e.target.id === "hvFrom" || e.target.id === "hvTo") {
+        var f = shadow.getElementById("hvFrom"), to = shadow.getElementById("hvTo");
+        handoverRange = LarkCore.parseRangeControls(f && f.value, to && to.value); // null -> default quarter
+        recomputeHandover();
+      }
     });
-    shadow.getElementById("expCsv").addEventListener("click", function () {
-      if (lastAnalysis) download("lark-base-report-" + stamp() + ".csv", LarkCore.buildReportCSV(lastAnalysis), "text/csv");
-    });
-    shadow.getElementById("expRaw").addEventListener("click", function () {
-      if (lastDataset) download("lark-base-rawdata-" + stamp() + ".csv", LarkCore.buildRawCSV(lastDataset), "text/csv");
+    ui.panel.addEventListener("input", function (e) {
+      if (e.target.id === "filter") {
+        filterText = e.target.value;
+        if (lastAnalysis) ui.fields.innerHTML = LarkCore.renderFields(lastAnalysis, filterText);
+      }
     });
     return ui;
   }
@@ -254,54 +283,97 @@
   function openPanel() { ensureUI(); ui.panel.classList.add("open"); ui.fab.style.display = "none"; }
   function closePanel() { if (ui) { ui.panel.classList.remove("open"); ui.fab.style.display = ""; } }
 
+  function escHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function legendHTML(h) {
+    if (!h || !h.persons || !h.persons.length) return "";
+    return h.persons.map(function (p, i) {
+      return '<span class="lg"><i style="background:#' + LarkCore.personColor(i).head + '"></i>' + escHtml(p) + "</span>";
+    }).join("");
+  }
+
   function renderPanel() {
     ensureUI();
-    ui.meta.textContent = lastAnalysis.rowCount.toLocaleString() + " rows × " + lastAnalysis.columns.length +
-      " columns · auto-generated " + new Date().toLocaleTimeString();
-    ui.summary.innerHTML = LarkCore.renderSummary(lastAnalysis);
-
     if (lastHandover) {
+      // Pivot-focused view: the Productivity window is the whole point of the panel.
+      ui.title.textContent = "Translator Productivity";
+      ui.meta.textContent = lastHandover.rowCount.toLocaleString() + " rows loaded · " + lastHandover.window +
+        (lastHandover.timeZone ? " · " + lastHandover.timeZone : "") + " · auto-generated " + new Date().toLocaleTimeString();
       ui.rangeBar.innerHTML = LarkCore.renderRangeControls(lastHandover.range);
-      var fromEl = ui.shadow.getElementById("hvFrom"), toEl = ui.shadow.getElementById("hvTo");
-      function applyRange() {
-        handoverRange = LarkCore.parseRangeControls(fromEl.value, toEl.value); // null -> default quarter
-        recomputeHandover();
-      }
-      if (fromEl) fromEl.addEventListener("change", applyRange);
-      if (toEl) toEl.addEventListener("change", applyRange);
-      var rs = ui.shadow.getElementById("hvReset");
-      if (rs) rs.addEventListener("click", function () { handoverRange = null; recomputeHandover(); });
-
-      ui.handover.innerHTML =
-        '<div class="sec-title">Translator productivity · ' + lastHandover.window +
-        ' <span style="float:right">' +
-        '<button class="btn" id="copyPivot">📋 Copy for sheet</button> ' +
-        '<button class="btn" id="expPivot">CSV</button></span></div>' +
-        '<div class="pivotwrap">' + LarkCore.renderHandover(lastHandover) + "</div>" +
-        '<hr><div class="sec-title">All columns</div>';
-      var cp = ui.shadow.getElementById("copyPivot");
-      if (cp) cp.addEventListener("click", function () { copyText(LarkCore.buildHandoverTSV(lastHandover), cp); });
-      var bp = ui.shadow.getElementById("expPivot");
-      if (bp) bp.addEventListener("click", function () {
-        download("handover-pivot-" + stamp() + ".csv", LarkCore.buildHandoverCSV(lastHandover), "text/csv");
-      });
+      ui.toolbar.innerHTML =
+        '<button class="btn" data-act="loadAll">⬇ Load all rows</button>' +
+        '<button class="btn primary" data-act="openFull">⛶ Open full view</button>' +
+        '<button class="btn" data-act="excel">⬇ Excel</button>' +
+        '<button class="btn" data-act="csv">CSV</button>' +
+        '<button class="btn" data-act="copy">📋 Copy</button>' +
+        '<button class="btn" data-act="expand">↔ Wide</button>';
+      ui.legend.innerHTML = legendHTML(lastHandover);
+      ui.handover.innerHTML = '<div class="pivotwrap">' + LarkCore.renderHandover(lastHandover) + "</div>";
+      ui.summary.innerHTML = "";
+      ui.fields.innerHTML = "";
     } else {
+      // Fallback (non-work-log tables): keep the generic per-column analytics.
+      ui.title.textContent = "Lark Base Analytics";
+      ui.meta.textContent = lastAnalysis.rowCount.toLocaleString() + " rows × " + lastAnalysis.columns.length +
+        " columns · auto-generated " + new Date().toLocaleTimeString();
       ui.rangeBar.innerHTML = "";
+      ui.legend.innerHTML = "";
       ui.handover.innerHTML = "";
+      ui.toolbar.innerHTML =
+        '<input class="filter" id="filter" placeholder="Filter columns by name…" />' +
+        '<button class="btn" data-act="loadAll">⬇ Load all rows</button>' +
+        '<button class="btn" data-act="expand">↔ Wide</button>' +
+        '<button class="btn" data-act="repHtml">HTML</button>' +
+        '<button class="btn" data-act="repCsv">CSV</button>' +
+        '<button class="btn" data-act="rawCsv">Raw CSV</button>';
+      var fEl = ui.shadow.getElementById("filter");
+      if (fEl) fEl.value = filterText;
+      ui.summary.innerHTML = LarkCore.renderSummary(lastAnalysis);
+      ui.fields.innerHTML = LarkCore.renderFields(lastAnalysis, filterText);
     }
-
-    ui.fields.innerHTML = LarkCore.renderFields(lastAnalysis, filterText);
     if (!panelOpenedOnce) { panelOpenedOnce = true; openPanel(); }
   }
 
-  function download(name, content, mime) {
-    var url = URL.createObjectURL(new Blob([content], { type: mime }));
+  // Open the full, colored pivot in a new browser tab — easier to review than the
+  // narrow panel. The page embeds Excel/CSV download links so it's self-contained.
+  function openFullPivot() {
+    if (!lastHandover || !window.LarkCore) return;
+    setPanelStatus("Building full view…");
+    var xlsxBlob = LarkCore.buildHandoverXLSX(lastHandover);
+    blobToBase64(xlsxBlob).then(function (xb) {
+      var csvB64 = utf8ToBase64(LarkCore.buildHandoverCSV(lastHandover));
+      var html = LarkCore.buildHandoverHTML(lastHandover, {
+        xlsxBase64: xb, csvBase64: csvB64, rowCount: lastHandover.rowCount,
+        generatedAt: new Date().toLocaleString(), fileBase: "handover-pivot-" + stamp()
+      });
+      var url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+      var w = window.open(url, "_blank");
+      setPanelStatus(w ? "" : "Pop-up blocked — allow pop-ups for this site to open the full view.");
+      setTimeout(function () { URL.revokeObjectURL(url); }, 120000);
+    }).catch(function (e) { setPanelStatus("Couldn't build full view (" + e.message + ")."); });
+  }
+
+  function download(name, content, mime) { downloadBlob(name, new Blob([content], { type: mime })); }
+  function downloadBlob(name, blob) {
+    var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
     a.href = url; a.download = name;
     (document.body || document.documentElement).appendChild(a);
     a.click(); a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
   }
+  function blobToBase64(blob) {
+    return new Promise(function (res, rej) {
+      var r = new FileReader();
+      r.onload = function () { res(String(r.result).split(",")[1] || ""); };
+      r.onerror = function () { rej(new Error("read failed")); };
+      r.readAsDataURL(blob);
+    });
+  }
+  function utf8ToBase64(str) { return btoa(unescape(encodeURIComponent(str))); }
   function stamp() { return new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-"); }
 
   // Copy text to clipboard (tab-separated grid for pasting into a sheet).

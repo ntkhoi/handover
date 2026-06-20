@@ -4,7 +4,9 @@
 "use strict";
 
 var els = {
+  title: document.getElementById("title"),
   openPanel: document.getElementById("openPanel"),
+  openFull: document.getElementById("openFull"),
   refresh: document.getElementById("refresh"),
   exportHtml: document.getElementById("exportHtml"),
   exportCsv: document.getElementById("exportCsv"),
@@ -25,6 +27,7 @@ init();
 function init() {
   els.refresh.addEventListener("click", load);
   els.openPanel.addEventListener("click", openOnPage);
+  els.openFull.addEventListener("click", openFullView);
   els.exportHtml.addEventListener("click", function () {
     if (analysis) download("lark-base-report-" + stamp() + ".html", LarkCore.buildReportHTML(analysis), "text/html");
   });
@@ -85,9 +88,26 @@ async function load() {
   setStatus(analysis.rowCount.toLocaleString() + " rows × " + analysis.columns.length + " columns. Generated " + analysis.generatedAt + ".");
 }
 
+function legendHTML(h) {
+  if (!h || !h.persons || !h.persons.length) return "";
+  return h.persons.map(function (p, i) {
+    return '<span class="lg"><i style="background:#' + LarkCore.personColor(i).head + '"></i>' + escHtml(p) + "</span>";
+  }).join("");
+}
+function escHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
 function render() {
-  els.summary.innerHTML = LarkCore.renderSummary(analysis);
+  els.openFull.disabled = !handover;
   if (handover) {
+    // Pivot-focused: the Productivity window is the whole point. Hide the generic
+    // per-column analytics (filter, summary, field cards, generic exports).
+    els.title.textContent = "Translator Productivity";
+    els.filter.hidden = els.exportHtml.hidden = els.exportCsv.hidden = true;
+    els.summary.innerHTML = "";
     els.rangeBar.innerHTML = LarkCore.renderRangeControls(handover.range);
     var fromEl = document.getElementById("hvFrom"), toEl = document.getElementById("hvTo");
     function onRange() { applyRange(LarkCore.parseRangeControls(fromEl.value, toEl.value)); }
@@ -97,11 +117,18 @@ function render() {
     if (rs) rs.addEventListener("click", function () { applyRange(null); });
 
     els.handover.innerHTML =
-      '<div class="sec-title">Translator productivity · ' + handover.window +
-      ' <span style="float:right"><button class="btn" id="copyPivot">📋 Copy for sheet</button> ' +
-      '<button class="btn" id="expPivot">CSV</button></span></div>' +
-      '<div class="pivotwrap">' + LarkCore.renderHandover(handover) + "</div>" +
-      '<div class="sec-title">All columns</div>';
+      '<div class="sec-title">' + escHtml(handover.window) +
+      ' <span style="float:right">' +
+      '<button class="btn small" id="expXlsx">⬇ Excel</button> ' +
+      '<button class="btn small" id="copyPivot">📋 Copy</button> ' +
+      '<button class="btn small" id="expPivot">CSV</button></span></div>' +
+      '<div class="legend">' + legendHTML(handover) + "</div>" +
+      '<div class="pivotwrap">' + LarkCore.renderHandover(handover) + "</div>";
+    els.report.innerHTML = "";
+    var xl = document.getElementById("expXlsx");
+    if (xl) xl.addEventListener("click", function () {
+      downloadBlob("handover-pivot-" + stamp() + ".xlsx", LarkCore.buildHandoverXLSX(handover));
+    });
     var cp = document.getElementById("copyPivot");
     if (cp) cp.addEventListener("click", function () {
       var t = cp.textContent;
@@ -113,11 +140,15 @@ function render() {
       download("handover-pivot-" + stamp() + ".csv", LarkCore.buildHandoverCSV(handover), "text/csv");
     });
   } else {
+    els.title.textContent = "Lark Base Analytics";
+    els.filter.hidden = false;
+    els.exportHtml.hidden = els.exportCsv.hidden = false;
     els.rangeBar.innerHTML = "";
     els.handover.innerHTML = "";
+    els.summary.innerHTML = LarkCore.renderSummary(analysis);
+    els.report.innerHTML = LarkCore.renderFields(analysis, filterText);
+    els.exportHtml.disabled = els.exportCsv.disabled = false;
   }
-  els.report.innerHTML = LarkCore.renderFields(analysis, filterText);
-  els.exportHtml.disabled = els.exportCsv.disabled = false;
 }
 
 // Send the chosen month range to the content script, which recomputes the pivot
@@ -141,8 +172,19 @@ async function openOnPage() {
   window.close();
 }
 
-function download(name, content, mime) {
-  var url = URL.createObjectURL(new Blob([content], { type: mime }));
+// The content script holds the data and a live tab, so let it build + open the
+// full-view tab (blob URLs created in the popup die when the popup closes).
+async function openFullView() {
+  if (!handover) return;
+  var tab = await activeTab();
+  var resp = tab && tab.id != null ? await sendToTab(tab.id, { type: "OPEN_FULL_PIVOT" }) : null;
+  if (resp && resp.ok) window.close();
+  else setStatus("Couldn't open the full view. Reload the Lark Base tab, then try again.", true);
+}
+
+function download(name, content, mime) { downloadBlob(name, new Blob([content], { type: mime })); }
+function downloadBlob(name, blob) {
+  var url = URL.createObjectURL(blob);
   var a = document.createElement("a");
   a.href = url; a.download = name;
   document.body.appendChild(a); a.click(); a.remove();

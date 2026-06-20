@@ -397,6 +397,31 @@
   var IN_PROGRESS_KEY = "Task in progress";
   var CANCELED_KEY = "Task Canceled";
   var BANNER_KEY = "Banner";
+
+  // Per-person color bands (matches the handover sheet style). Each person gets one
+  // entry, cycling if there are more people than colors. `head` = the person name
+  // band, `sub` = the stage row underneath, both light enough for black text.
+  // Hex WITHOUT the leading "#": used as "#"+hex in CSS and "FF"+hex (ARGB) in xlsx.
+  var PERSON_PALETTE = [
+    { head: "F48FB1", sub: "FCE4EC" }, // pink
+    { head: "A5D6A7", sub: "E8F5E9" }, // green
+    { head: "FFE082", sub: "FFFDE7" }, // amber
+    { head: "90CAF9", sub: "E3F2FD" }, // blue
+    { head: "CE93D8", sub: "F3E5F5" }, // purple
+    { head: "FFCC80", sub: "FFF3E0" }, // orange
+    { head: "80CBC4", sub: "E0F2F1" }, // teal
+    { head: "BCAAA4", sub: "EFEBE9" }, // brown
+    { head: "B0BEC5", sub: "ECEFF1" }, // blue-grey
+    { head: "EF9A9A", sub: "FFEBEE" }  // red
+  ];
+  function personColor(i) { return PERSON_PALETTE[((i % PERSON_PALETTE.length) + PERSON_PALETTE.length) % PERSON_PALETTE.length]; }
+  function personColorMap(persons) {
+    var m = {};
+    (persons || []).forEach(function (p, i) { m[p] = personColor(i); });
+    return m;
+  }
+  // The non-date pivot rows that get a highlighted (summary) style.
+  function isSpecialKey(k) { return k === IN_PROGRESS_KEY || k === CANCELED_KEY || k === BANNER_KEY; }
   // Candidate names for the record creation time. NOTE: a field may be NAMED like a
   // creation time but actually be a broken text/formula constant (seen in real data:
   // a "创建时间" field holding the same number for every row) — so we only accept a
@@ -735,20 +760,85 @@
     return cols;
   }
 
-  function renderHandover(h) {
+  // Colored, grouped pivot table (shared by the on-page panel, the popup, and the
+  // standalone full-view page). Header is two rows: a person-name band (colspan =
+  // #stages) over a stage row (Translate/Proofread/Haibao), each tinted by person.
+  function pivotTableHTML(h) {
     if (!h || !h.persons.length) return '<p class="empty">No completed translator work in this window among the loaded rows. Click “⬇ Load all rows”, or scroll the table to load more.</p>';
+    var colors = personColorMap(h.persons);
+    var nStages = h.stages.length;
+    var groupRow = '<th class="d" rowspan="2">Translation Completion Date</th>' + h.persons.map(function (p) {
+      return '<th class="grp" colspan="' + nStages + '" style="background:#' + colors[p].head + '">' + esc(p) + "</th>";
+    }).join("");
+    var stageRow = h.persons.map(function (p) {
+      return h.stages.map(function (st) { return '<th class="stg" style="background:#' + colors[p].sub + '">' + esc(st) + "</th>"; }).join("");
+    }).join("");
     var cols = handoverColumns(h);
-    var th = '<th class="d">Translation Completion Date</th>' + cols.map(function (c) { return "<th>" + esc(c.label) + "</th>"; }).join("");
-    var totalRow = '<tr class="tot"><td class="d">Total</td>' + cols.map(function (c) {
-      return "<td>" + fmt(h.totals[c.person][c.stage] || 0) + "</td>";
-    }).join("") + "</tr>";
-    var body = h.dateKeys.map(function (k) {
-      return '<tr><td class="d">' + esc(k) + "</td>" + cols.map(function (c) {
-        var v = (h.pivot[k] && h.pivot[k][c.person] && h.pivot[k][c.person][c.stage]) || 0;
+    function dataRow(label, getter, cls) {
+      return "<tr" + (cls ? ' class="' + cls + '"' : "") + '><td class="d">' + esc(label) + "</td>" + cols.map(function (c) {
+        var v = getter(c);
         return "<td>" + (v ? fmt(v) : "") + "</td>";
       }).join("") + "</tr>";
+    }
+    var totalRow = dataRow("Total", function (c) { return h.totals[c.person][c.stage] || 0; }, "tot");
+    var body = h.dateKeys.map(function (k) {
+      return dataRow(k, function (c) { return (h.pivot[k] && h.pivot[k][c.person] && h.pivot[k][c.person][c.stage]) || 0; }, isSpecialKey(k) ? "special" : "");
     }).join("");
-    return '<table class="pivot"><thead><tr>' + th + "</tr></thead><tbody>" + totalRow + body + "</tbody></table>";
+    return '<table class="pivot"><thead><tr class="grouprow">' + groupRow + '</tr><tr class="stagerow">' + stageRow +
+      "</tr></thead><tbody>" + totalRow + body + "</tbody></table>";
+  }
+
+  function renderHandover(h) { return pivotTableHTML(h); }
+
+  // ---- Standalone full-view HTML page (opened in a new tab) ----
+  var FULLVIEW_CSS =
+    "*{box-sizing:border-box}" +
+    "body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2329;background:#f5f6f8}" +
+    "header{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;" +
+    "padding:14px 22px;background:#fff;border-bottom:1px solid #e5e6eb;box-shadow:0 1px 4px rgba(0,0,0,.04)}" +
+    "header h1{font-size:18px;margin:0}header .meta{color:#646a73;font-size:12px;margin-top:3px}" +
+    ".tools{display:flex;gap:8px;flex-wrap:wrap}" +
+    ".btn{border:1px solid #d4d6dc;background:#fff;color:#1f2329;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}" +
+    ".btn:hover{border-color:#3370ff;color:#3370ff}.btn.primary{background:#3370ff;border-color:#3370ff;color:#fff}.btn.primary:hover{background:#2860e0;color:#fff}" +
+    ".legend{display:flex;gap:14px;flex-wrap:wrap;padding:12px 22px 0;font-size:12px;color:#646a73}.legend .lg{display:inline-flex;align-items:center;gap:6px}.legend i{width:14px;height:14px;border-radius:4px;display:inline-block;border:1px solid rgba(0,0,0,.08)}" +
+    ".tablewrap{margin:14px 22px 30px;overflow:auto;max-height:calc(100vh - 150px);border:1px solid #e5e6eb;border-radius:10px;background:#fff}" +
+    "table.pivot{border-collapse:separate;border-spacing:0;font-size:13px;white-space:nowrap;width:max-content}" +
+    "table.pivot th,table.pivot td{padding:7px 12px;border-right:1px solid #eef0f2;border-bottom:1px solid #eef0f2;text-align:right;font-variant-numeric:tabular-nums}" +
+    "table.pivot thead th{position:sticky;font-weight:600;color:#1f2329}" +
+    "table.pivot tr.grouprow th{top:0;z-index:6;text-align:center;font-weight:700;font-size:13px}" +
+    "table.pivot tr.stagerow th{top:38px;z-index:5;text-align:center;font-weight:600;color:#3c4043}" +
+    "table.pivot th.d,table.pivot td.d{position:sticky;left:0;text-align:left;font-weight:600;background:#fff}" +
+    "table.pivot tr.grouprow th.d{top:0;z-index:8;background:#f0f2f5}" +
+    "table.pivot td.d{z-index:3}" +
+    "table.pivot tbody td{background:#fff}" +
+    "table.pivot tr.tot td{background:#eef3ff!important;font-weight:700}" +
+    "table.pivot tr.special td{background:#fff7e6!important;font-weight:600}" +
+    "table.pivot tbody tr:hover td{background:#f7f9ff}" +
+    "@media print{header{position:static;box-shadow:none}.tools{display:none}.tablewrap{max-height:none;overflow:visible;border:none}body{background:#fff}}";
+
+  function buildHandoverHTML(h, opts) {
+    opts = opts || {};
+    var colors = personColorMap((h && h.persons) || []);
+    var legend = ((h && h.persons) || []).map(function (p) {
+      return '<span class="lg"><i style="background:#' + colors[p].head + '"></i>' + esc(p) + "</span>";
+    }).join("");
+    var base = opts.fileBase || "handover-pivot";
+    var links = "";
+    if (opts.xlsxBase64) links += '<a class="btn primary" download="' + esc(base) + '.xlsx" href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,' + opts.xlsxBase64 + '">⬇ Excel (.xlsx)</a>';
+    if (opts.csvBase64) links += '<a class="btn" download="' + esc(base) + '.csv" href="data:text/csv;charset=utf-8;base64,' + opts.csvBase64 + '">⬇ CSV</a>';
+    var meta = [];
+    if (h && h.window) meta.push(esc(h.window));
+    if (opts.rowCount != null) meta.push(fmt(opts.rowCount) + " rows loaded");
+    if (h && h.timeZone) meta.push(esc(h.timeZone));
+    if (opts.generatedAt) meta.push("generated " + esc(opts.generatedAt));
+    return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+      "<title>Translator Productivity" + (h && h.window ? " · " + esc(h.window) : "") + "</title>" +
+      "<style>" + FULLVIEW_CSS + "</style></head><body>" +
+      '<header><div><h1>Translator Productivity</h1><div class="meta">' + meta.join(" · ") + "</div></div>" +
+      '<div class="tools"><button class="btn" onclick="window.print()">🖨 Print / PDF</button>' + links + "</div></header>" +
+      (legend ? '<div class="legend">' + legend + "</div>" : "") +
+      '<div class="tablewrap">' + pivotTableHTML(h) + "</div></body></html>";
   }
 
   // Build the pivot as a 2D grid: header + Total + (in-progress, daily…) rows.
@@ -775,12 +865,225 @@
     return handoverGrid(h).map(function (r) { return r.join("\t"); }).join("\n");
   }
 
+  // ---------- .xlsx export (real OOXML, colored like the handover sheet) ----------
+  // A self-contained, dependency-free .xlsx writer. We emit the handful of XML parts
+  // Excel needs and pack them into a ZIP with the STORE method (no compression — the
+  // pivot is tiny), so we only need a CRC-32, not a deflate implementation.
+
+  // 1-based column index -> spreadsheet column letters (1->A, 27->AA).
+  function colLetter(n) {
+    var s = "";
+    while (n > 0) { var m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = (n - m - 1) / 26; }
+    return s;
+  }
+
+  var _crcTable = null;
+  function crc32(bytes) {
+    if (!_crcTable) {
+      _crcTable = [];
+      for (var n = 0; n < 256; n++) {
+        var c = n;
+        for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        _crcTable[n] = c >>> 0;
+      }
+    }
+    var crc = 0xFFFFFFFF;
+    for (var i = 0; i < bytes.length; i++) crc = _crcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  // Pack [{name, data:Uint8Array}] into a ZIP archive (stored). Returns Uint8Array.
+  function zipStore(files) {
+    var enc = new TextEncoder();
+    var chunks = [], central = [], offset = 0;
+    function u16(n) { return [n & 0xff, (n >>> 8) & 0xff]; }
+    function u32(n) { return [n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff]; }
+    var DOSDATE = 0x21, DOSTIME = 0; // 1980-01-01 00:00, fixed for determinism
+    files.forEach(function (f) {
+      var nameBytes = enc.encode(f.name), crc = crc32(f.data), size = f.data.length;
+      var local = [].concat(u32(0x04034b50), u16(20), u16(0), u16(0), u16(DOSTIME), u16(DOSDATE),
+        u32(crc), u32(size), u32(size), u16(nameBytes.length), u16(0));
+      chunks.push(new Uint8Array(local), nameBytes, f.data);
+      var cd = [].concat(u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(DOSTIME), u16(DOSDATE),
+        u32(crc), u32(size), u32(size), u16(nameBytes.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset));
+      central.push(new Uint8Array(cd), nameBytes);
+      offset += local.length + nameBytes.length + size;
+    });
+    var cdStart = offset, cdLen = 0;
+    central.forEach(function (c) { chunks.push(c); cdLen += c.length; });
+    chunks.push(new Uint8Array([].concat(u32(0x06054b50), u16(0), u16(0),
+      u16(files.length), u16(files.length), u32(cdLen), u32(cdStart), u16(0))));
+    var total = chunks.reduce(function (a, c) { return a + c.length; }, 0);
+    var out = new Uint8Array(total), p = 0;
+    chunks.forEach(function (c) { out.set(c, p); p += c.length; });
+    return out;
+  }
+
+  var XLSX_CONTENT_TYPES =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+    "</Types>";
+  var XLSX_ROOT_RELS =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+    "</Relationships>";
+  var XLSX_WORKBOOK =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+    '<sheets><sheet name="Productivity" sheetId="1" r:id="rId1"/></sheets></workbook>';
+  var XLSX_WORKBOOK_RELS =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+    "</Relationships>";
+
+  var XLSX_DATE_HDR = "D9D9D9", XLSX_TOTAL = "DCE6F1"; // grey date header, light-blue total
+
+  // Build styles.xml + a lookup of cell-style (xf) indices keyed by role/person.
+  function buildXlsxStyles(persons) {
+    var palette = personColorMap(persons);
+    var colorList = [], colorIdx = {};
+    function need(hex) { if (!(hex in colorIdx)) { colorIdx[hex] = colorList.length; colorList.push(hex); } }
+    persons.forEach(function (p) { need(palette[p].head); need(palette[p].sub); });
+    need(XLSX_DATE_HDR); need(XLSX_TOTAL);
+    function fillOf(hex) { return 2 + colorIdx[hex]; } // 0 = none, 1 = gray125
+
+    var fills = '<fills count="' + (2 + colorList.length) + '">' +
+      '<fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>' +
+      colorList.map(function (hex) { return '<fill><patternFill patternType="solid"><fgColor rgb="FF' + hex + '"/><bgColor indexed="64"/></patternFill></fill>'; }).join("") + "</fills>";
+    var fonts = '<fonts count="2"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font>' +
+      '<font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts>';
+    var borders = '<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>' +
+      '<border><left style="thin"><color rgb="FFBFBFBF"/></left><right style="thin"><color rgb="FFBFBFBF"/></right>' +
+      '<top style="thin"><color rgb="FFBFBFBF"/></top><bottom style="thin"><color rgb="FFBFBFBF"/></bottom><diagonal/></border></borders>';
+
+    var xfs = [], idx = {};
+    function push(o) {
+      var s = '<xf numFmtId="' + (o.numFmt || 0) + '" fontId="' + (o.font || 0) + '" fillId="' + (o.fill || 0) + '" borderId="' + (o.border || 0) + '" xfId="0"';
+      if (o.numFmt) s += ' applyNumberFormat="1"';
+      if (o.font) s += ' applyFont="1"';
+      if (o.fill) s += ' applyFill="1"';
+      if (o.border) s += ' applyBorder="1"';
+      if (o.align) s += ' applyAlignment="1"><alignment' + (o.align.h ? ' horizontal="' + o.align.h + '"' : "") + (o.align.v ? ' vertical="' + o.align.v + '"' : "") + (o.align.wrap ? ' wrapText="1"' : "") + "/></xf>";
+      else s += "/>";
+      xfs.push(s);
+      return xfs.length - 1;
+    }
+    idx.def = push({});
+    idx.dateHdr = push({ font: 1, fill: fillOf(XLSX_DATE_HDR), border: 1, align: { h: "center", v: "center", wrap: true } });
+    idx.dataNum = push({ numFmt: 164, fill: 0, border: 1, align: { h: "right" } });
+    idx.dataLabel = push({ fill: 0, border: 1, align: { h: "left" } });
+    idx.totLabel = push({ font: 1, fill: fillOf(XLSX_TOTAL), border: 1, align: { h: "left" } });
+    idx.totNum = push({ font: 1, numFmt: 164, fill: fillOf(XLSX_TOTAL), border: 1, align: { h: "right" } });
+    idx.head = {}; idx.sub = {};
+    persons.forEach(function (p) {
+      idx.head[p] = push({ font: 1, fill: fillOf(palette[p].head), border: 1, align: { h: "center", v: "center", wrap: true } });
+      idx.sub[p] = push({ font: 1, fill: fillOf(palette[p].sub), border: 1, align: { h: "center" } });
+    });
+
+    var xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0"/></numFmts>' +
+      fonts + fills + borders +
+      '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+      '<cellXfs count="' + xfs.length + '">' + xfs.join("") + "</cellXfs>" +
+      '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
+    return { xml: xml, idx: idx };
+  }
+
+  function buildHandoverXLSX(h) {
+    var persons = (h && h.persons) || [];
+    var styles = buildXlsxStyles(persons), idx = styles.idx;
+    var cols = handoverColumns(h), nStages = h.stages.length;
+    var lastColN = cols.length + 1; // + the date column
+    var rows = [];
+
+    // Row 1: person-name band (label sits in the first stage column, merged over the rest).
+    var c1 = ['<c r="A1" s="' + idx.dateHdr + '" t="inlineStr"><is><t xml:space="preserve">Translation Completion Date</t></is></c>'];
+    var n = 2;
+    persons.forEach(function (p) {
+      for (var st = 0; st < nStages; st++) {
+        var ref = colLetter(n) + "1";
+        c1.push(st === 0
+          ? '<c r="' + ref + '" s="' + idx.head[p] + '" t="inlineStr"><is><t xml:space="preserve">' + esc(p) + "</t></is></c>"
+          : '<c r="' + ref + '" s="' + idx.head[p] + '"/>');
+        n++;
+      }
+    });
+    rows.push('<row r="1">' + c1.join("") + "</row>");
+
+    // Row 2: stage row (Translate / Proofread / Haibao).
+    var c2 = ['<c r="A2" s="' + idx.dateHdr + '"/>'];
+    n = 2;
+    persons.forEach(function (p) {
+      h.stages.forEach(function (stage) {
+        c2.push('<c r="' + colLetter(n) + '2" s="' + idx.sub[p] + '" t="inlineStr"><is><t xml:space="preserve">' + esc(stage) + "</t></is></c>");
+        n++;
+      });
+    });
+    rows.push('<row r="2">' + c2.join("") + "</row>");
+
+    var rowNum = 3;
+    function dataRow(label, getter, hi) {
+      var labelS = hi ? idx.totLabel : idx.dataLabel, numS = hi ? idx.totNum : idx.dataNum;
+      var cells = ['<c r="A' + rowNum + '" s="' + labelS + '" t="inlineStr"><is><t xml:space="preserve">' + esc(label) + "</t></is></c>"];
+      var cn = 2;
+      cols.forEach(function (c) {
+        var v = getter(c), ref = colLetter(cn) + rowNum;
+        cells.push(v ? '<c r="' + ref + '" s="' + numS + '"><v>' + v + "</v></c>" : '<c r="' + ref + '" s="' + numS + '"/>');
+        cn++;
+      });
+      rows.push('<row r="' + rowNum + '">' + cells.join("") + "</row>");
+      rowNum++;
+    }
+    dataRow("Total", function (c) { return h.totals[c.person][c.stage] || 0; }, true);
+    h.dateKeys.forEach(function (k) {
+      dataRow(k, function (c) { return (h.pivot[k] && h.pivot[k][c.person] && h.pivot[k][c.person][c.stage]) || 0; }, isSpecialKey(k));
+    });
+
+    var merges = ['<mergeCell ref="A1:A2"/>'];
+    var mc = 2;
+    persons.forEach(function () { merges.push('<mergeCell ref="' + colLetter(mc) + "1:" + colLetter(mc + nStages - 1) + '1"/>'); mc += nStages; });
+
+    var sheet = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<dimension ref="A1:' + colLetter(lastColN) + (rowNum - 1) + '"/>' +
+      '<sheetViews><sheetView workbookViewId="0"><pane xSplit="1" ySplit="2" topLeftCell="B3" activePane="bottomRight" state="frozen"/><selection pane="bottomRight"/></sheetView></sheetViews>' +
+      '<sheetFormatPr defaultRowHeight="15"/>' +
+      '<cols><col min="1" max="1" width="26" customWidth="1"/><col min="2" max="' + lastColN + '" width="13" customWidth="1"/></cols>' +
+      "<sheetData>" + rows.join("") + "</sheetData>" +
+      '<mergeCells count="' + merges.length + '">' + merges.join("") + "</mergeCells></worksheet>";
+
+    var enc = new TextEncoder();
+    var zip = zipStore([
+      { name: "[Content_Types].xml", data: enc.encode(XLSX_CONTENT_TYPES) },
+      { name: "_rels/.rels", data: enc.encode(XLSX_ROOT_RELS) },
+      { name: "xl/workbook.xml", data: enc.encode(XLSX_WORKBOOK) },
+      { name: "xl/_rels/workbook.xml.rels", data: enc.encode(XLSX_WORKBOOK_RELS) },
+      { name: "xl/styles.xml", data: enc.encode(styles.xml) },
+      { name: "xl/worksheets/sheet1.xml", data: enc.encode(sheet) }
+    ]);
+    return new Blob([zip], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  }
+
   root.LarkCore = {
     FIELD_TYPE: FIELD_TYPE,
     detectHandover: detectHandover,
     buildHandover: buildHandover,
     diagnoseHandover: diagnoseHandover,
     renderHandover: renderHandover,
+    buildHandoverHTML: buildHandoverHTML,
+    buildHandoverXLSX: buildHandoverXLSX,
+    personColor: personColor,
+    personColorMap: personColorMap,
+    PERSON_PALETTE: PERSON_PALETTE,
     renderRangeControls: renderRangeControls,
     parseRangeControls: parseRangeControls,
     monthInputValue: monthInputValue,
