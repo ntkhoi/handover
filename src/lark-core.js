@@ -183,8 +183,24 @@
     return null;
   }
 
+  function toTimestampMs(v) {
+    if (v == null || v === "") return NaN;
+    if (typeof v === "number") {
+      if (!isFinite(v)) return NaN;
+      // Lark date cells normally use milliseconds, while auto-created timestamps
+      // can arrive as Unix seconds.
+      if (v > 1e9 && v < 1e11) return v * 1000;
+      return v;
+    }
+    var parsed = Date.parse(v);
+    return isNaN(parsed) ? NaN : parsed;
+  }
+
   function cellToDate(v) {
-    if (typeof v === "number") return (v > 1e11 && v < 4e12) ? v : null;
+    if (typeof v === "number") {
+      var ms = toTimestampMs(v);
+      return (ms > 1e11 && ms < 4e12) ? ms : null;
+    }
     if (typeof v === "string") {
       if (!/\d{4}|\d{1,2}[/-]\d{1,2}/.test(v)) return null;
       var t = Date.parse(v);
@@ -380,11 +396,13 @@
   };
   var IN_PROGRESS_KEY = "Task in progress";
   var CANCELED_KEY = "Task Canceled";
+  var BANNER_KEY = "Banner";
   // Candidate names for the record creation time. NOTE: a field may be NAMED like a
   // creation time but actually be a broken text/formula constant (seen in real data:
   // a "创建时间" field holding the same number for every row) — so we only accept a
   // candidate that is genuinely a DATE-typed field (5 = date, 1001/1002 = auto times).
   var CREATED_NAMES = ["Creation Time", "Created Time", "Created time", "创建时间", "建立时间"];
+  var BANNER_CREATED_NAMES = ["创建时间", "Creation Time", "Created Time", "Created time", "建立时间"];
   var DATE_TYPES = { 5: 1, 1001: 1, 1002: 1 };
 
   function findFieldId(dataset, names) {
@@ -395,15 +413,14 @@
     return null;
   }
 
-  // Does a field actually hold ms-timestamp values? (Rejects the broken "创建时间"
-  // constant "1781801208", which parses to no valid date.)
+  // Does a field actually hold timestamp values?
   function looksLikeDateField(dataset, fieldId) {
     var order = dataset.order || [], seen = 0, dates = 0;
     for (var i = 0; i < order.length && seen < 40; i++) {
       var v = (dataset.recordsById[order[i]] || {})[fieldId];
       if (v == null || v === "") continue;
       seen++;
-      var ms = (typeof v === "number") ? v : Date.parse(v);
+      var ms = toTimestampMs(v);
       if (!isNaN(ms) && ms > 1e11 && ms < 4e12) dates++;
     }
     return seen > 0 && dates >= seen * 0.6;
@@ -428,10 +445,21 @@
     return hint ? hint.id : null;
   }
 
+  function findDateFieldByNames(dataset, names) {
+    for (var i = 0; i < names.length; i++) {
+      var named = dataset.fields.filter(function (x) { return x.name === names[i]; });
+      for (var j = 0; j < named.length; j++) {
+        if (DATE_TYPES[named[j].type] || looksLikeDateField(dataset, named[j].id)) return named[j].id;
+      }
+    }
+    return null;
+  }
+
   function detectHandover(dataset) {
     var ids = {};
     Object.keys(HANDOVER_FIELDS).forEach(function (k) { ids[k] = findFieldId(dataset, HANDOVER_FIELDS[k]); });
     ids.created = findCreatedField(dataset);
+    ids.bannerCreated = findDateFieldByNames(dataset, BANNER_CREATED_NAMES) || ids.created;
     return (ids.translator && ids.proofreader && ids.wc) ? ids : null;
   }
 
@@ -509,6 +537,7 @@
     }
     pivot[CANCELED_KEY] = {};
     pivot[IN_PROGRESS_KEY] = {};
+    pivot[BANNER_KEY] = {};
     var STAGES = ["Translate", "Proofread", "Haibao"];
 
     function add(key, person, stage, amt) {
@@ -519,9 +548,9 @@
       pivot[key][person][stage] = (pivot[key][person][stage] || 0) + amt;
     }
 
-    // Map a timestamp (ms, or a parseable date string) to its in-window day key, or null.
+    // Map a timestamp to its in-window day key, or null.
     function winKeyOf(raw) {
-      var ms = (typeof raw === "number") ? raw : (raw ? Date.parse(raw) : NaN);
+      var ms = toTimestampMs(raw);
       if (isNaN(ms)) return null;
       var p = tzParts(ms, tz);
       return inWin[p.y + "-" + p.m + "-" + p.d] || null;
@@ -532,6 +561,14 @@
       var wc = toNum(r[f.wc]), uiwc = f.uiwc ? toNum(r[f.uiwc]) : 0;
       var translators = splitPersons(r[f.translator]);
       var proofreaders = splitPersons(r[f.proofreader]);
+
+      // Banner row: each UI Reviewer's UI Review Word Count, filtered by CREATION
+      // time (created within the window), regardless of status. Shown in the
+      // Proofread column. Computed for every record (incl. in-progress/canceled).
+      if (f.reviewer && uiwc) {
+        var bannerIn = f.bannerCreated ? winKeyOf(r[f.bannerCreated]) : "all";
+        if (bannerIn) splitPersons(r[f.reviewer]).forEach(function (p) { add(BANNER_KEY, p, "Proofread", uiwc); });
+      }
 
       // Special rows ("Task in progress" / "Task Canceled") are keyed off the
       // Translation Status and filtered by CREATION time (创建时间), not completion.
@@ -557,15 +594,15 @@
       }
       var kT = dayKey(f.transStatus);
       var kP = dayKey(f.proofStatus);
-      var kH = dayKey(f.uiStatus);
       translators.forEach(function (p) { add(kT, p, "Translate", wc); });
       proofreaders.forEach(function (p) { add(kP, p, "Proofread", wc); });
-      if (f.reviewer) splitPersons(r[f.reviewer]).forEach(function (p) { add(kH, p, "Haibao", uiwc); });
+      // Haibao day data intentionally not populated — the column stays (header +
+      // 0 total) but holds no values. UI-review word count now feeds the Banner row.
     });
 
     var personList = Object.keys(persons).sort();
-    // Canceled + in-progress rows first (above the daily breakdown), then dates desc.
-    var dateKeys = [CANCELED_KEY, IN_PROGRESS_KEY].concat(windowKeys);
+    // Canceled, in-progress, then banner rows first (above the daily breakdown), then dates desc.
+    var dateKeys = [CANCELED_KEY, IN_PROGRESS_KEY, BANNER_KEY].concat(windowKeys);
 
     var totals = {};
     personList.forEach(function (p) {
@@ -604,12 +641,37 @@
       matched[which]++;
       if (toNum(r[f.wc]) > 0) wcPos[which]++;
       var raw = f.created ? r[f.created] : null;
-      var ms = (typeof raw === "number") ? raw : (raw ? Date.parse(raw) : NaN);
+      var ms = toTimestampMs(raw);
       var ym = isNaN(ms) ? "(no creation date)" : (function () { var p = tzParts(ms, tz); return p.y + "-" + (p.m < 10 ? "0" : "") + p.m; })();
       createdMonths[ym] = (createdMonths[ym] || 0) + 1;
     });
     var top = Object.keys(statusCounts).sort(function (a, b) { return statusCounts[b] - statusCounts[a]; })
       .slice(0, 15).map(function (k) { return k + " ×" + statusCounts[k]; });
+
+    // Banner breakdown: per UI Reviewer, total vs in-window UI Review Word Count,
+    // so you can tell apart a window issue (records exist but fall outside) from a
+    // data-loading issue (records simply aren't loaded). Mirrors the Banner math.
+    var nowMs = (opts && opts.now) ? new Date(opts.now).getTime() : Date.now();
+    var nowP = tzParts(nowMs, tz);
+    var ro = opts && opts.range;
+    var range = (ro && ro.fromYear && ro.fromMonth && ro.toYear && ro.toMonth) ? normalizeRange(ro) : quarterRange(nowP);
+    var fromIdx = range.fromYear * 12 + (range.fromMonth - 1), toIdx = range.toYear * 12 + (range.toMonth - 1);
+    var banner = {};
+    dataset.order.forEach(function (id) {
+      var r = dataset.recordsById[id] || {};
+      var amt = f.uiwc ? toNum(r[f.uiwc]) : 0;
+      if (!amt || !f.reviewer) return;
+      var raw = f.bannerCreated ? r[f.bannerCreated] : null;
+      var ms = toTimestampMs(raw);
+      var idx = isNaN(ms) ? null : (function () { var p = tzParts(ms, tz); return p.y * 12 + (p.m - 1); })();
+      var inWin = idx != null && idx >= fromIdx && idx <= toIdx;
+      splitPersons(r[f.reviewer]).forEach(function (p) {
+        banner[p] = banner[p] || { uiwcAllDates: 0, uiwcInWindow: 0, recordsAllDates: 0, recordsInWindow: 0 };
+        banner[p].uiwcAllDates += amt; banner[p].recordsAllDates++;
+        if (inWin) { banner[p].uiwcInWindow += amt; banner[p].recordsInWindow++; }
+      });
+    });
+
     return {
       rowsLoaded: dataset.order.length,
       statusField: nameOf(f.transStatus),
@@ -617,8 +679,12 @@
       matchedInProgress: matched.inProgress, matchedCanceled: matched.canceled,
       ofThoseWithWordCount: { inProgress: wcPos.inProgress, canceled: wcPos.canceled },
       creationField: nameOf(f.created),
+      bannerCreationField: nameOf(f.bannerCreated),
       creationSampleValue: f.created && dataset.order.length ? dataset.recordsById[dataset.order[0]][f.created] : null,
-      createdMonthsOfMatched: createdMonths
+      createdMonthsOfMatched: createdMonths,
+      uiReviewWordCountField: nameOf(f.uiwc),
+      windowRange: range.fromYear + "-" + range.fromMonth + " .. " + range.toYear + "-" + range.toMonth,
+      bannerByReviewer: banner
     };
   }
 
