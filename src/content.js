@@ -12,6 +12,7 @@
   var lastAnalysis = null;
   var lastHandover = null;
   var lastDataset = null;
+  var handoverRange = null; // null = current-quarter default; set by the From/To pickers
   var loadingAll = false;
   var panelOpenedOnce = false;
   var computeTimer = null;
@@ -72,7 +73,7 @@
     if (!dataset.order.length) return;
     lastDataset = dataset;
     lastAnalysis = LarkCore.buildAnalysis(dataset, location.href);
-    lastHandover = LarkCore.buildHandover(dataset, { timeZone: state.timeZone }); // null unless work-log table
+    lastHandover = LarkCore.buildHandover(dataset, { timeZone: state.timeZone, range: handoverRange }); // null unless work-log table
     try {
       chrome.storage.local.set({ larkAnalysis: lastAnalysis, larkHandover: lastHandover, larkUrl: location.href, larkAt: Date.now() });
     } catch (e) {}
@@ -132,10 +133,21 @@
 
   function setPanelStatus(text) { if (ui && ui.status) ui.status.textContent = text || ""; }
 
+  // Recompute the handover pivot for the current handoverRange and re-render.
+  // Only re-render if the on-page panel already exists — a popup-driven range
+  // change shouldn't pop the panel open on the page.
+  function recomputeHandover() {
+    if (!lastDataset || !window.LarkCore) return;
+    lastHandover = LarkCore.buildHandover(lastDataset, { timeZone: state.timeZone, range: handoverRange });
+    try { chrome.storage.local.set({ larkHandover: lastHandover }); } catch (e) {}
+    if (ui) renderPanel();
+  }
+
   // ---- popup messaging ----
   chrome.runtime.onMessage.addListener(function (msg, _sender, sendResponse) {
     if (!msg) return;
     if (msg.type === "GET_ANALYSIS") sendResponse({ analysis: lastAnalysis, handover: lastHandover, url: location.href });
+    else if (msg.type === "SET_HANDOVER_RANGE") { handoverRange = msg.range || null; recomputeHandover(); sendResponse({ handover: lastHandover }); }
     else if (msg.type === "OPEN_PANEL") { ensureUI(); openPanel(); sendResponse({ ok: !!lastAnalysis }); }
     else if (msg.type === "CLEAR") {
       lastAnalysis = null; state = { fieldMap: null, userMap: null, recordMap: null, order: null };
@@ -172,6 +184,9 @@
     "table.freq{width:100%;border-collapse:collapse;margin-top:6px}table.freq td{padding:2px 4px;border-top:1px solid #eee}table.freq td.c{text-align:right;color:#646a73}.bar{width:40%}.barfill{height:8px;background:#3370ff;border-radius:4px}" +
     ".empty{color:#646a73}" +
     ".sec-title{font-size:13px;font-weight:600;margin:6px 0}" +
+    ".rangebar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:10px}.rangebar:empty{display:none}" +
+    ".rangebar label{display:flex;gap:4px;align-items:center;color:#646a73}.rangebar .rangebar-label{font-weight:600;color:#1f2329}.rangebar .arrow{color:#646a73}" +
+    "input.month{border:1px solid #e5e6eb;border-radius:6px;padding:4px 6px;font-size:12px;color:#1f2329}" +
     ".pivotwrap{overflow:auto;max-height:46vh;border:1px solid #e5e6eb;border-radius:8px;margin-bottom:10px}" +
     "table.pivot{border-collapse:collapse;font-size:12px;white-space:nowrap}table.pivot th,table.pivot td{padding:4px 8px;border:1px solid #eee;text-align:right;font-variant-numeric:tabular-nums}" +
     "table.pivot th{position:sticky;top:0;background:#f7f8fa;font-weight:600}table.pivot td.d,table.pivot th.d{position:sticky;left:0;background:#fff;text-align:left;font-weight:500}table.pivot tr.tot td{background:#eef3ff;font-weight:600}table.pivot th.d{z-index:1;background:#f7f8fa}" +
@@ -200,7 +215,7 @@
       '    <div class="meta" id="status"></div>' +
       '    <div class="summary" id="summary"></div>' +
       "  </div>" +
-      '  <div class="body"><div id="handover"></div><div id="fields"></div></div>' +
+      '  <div class="body"><div id="rangeBar" class="rangebar"></div><div id="handover"></div><div id="fields"></div></div>' +
       "</div>";
     (document.body || document.documentElement).appendChild(host);
 
@@ -209,6 +224,7 @@
       panel: shadow.getElementById("panel"),
       fab: shadow.getElementById("fab"),
       summary: shadow.getElementById("summary"),
+      rangeBar: shadow.getElementById("rangeBar"),
       handover: shadow.getElementById("handover"),
       fields: shadow.getElementById("fields"),
       meta: shadow.getElementById("meta"),
@@ -244,6 +260,17 @@
     ui.summary.innerHTML = LarkCore.renderSummary(lastAnalysis);
 
     if (lastHandover) {
+      ui.rangeBar.innerHTML = LarkCore.renderRangeControls(lastHandover.range);
+      var fromEl = ui.shadow.getElementById("hvFrom"), toEl = ui.shadow.getElementById("hvTo");
+      function applyRange() {
+        handoverRange = LarkCore.parseRangeControls(fromEl.value, toEl.value); // null -> default quarter
+        recomputeHandover();
+      }
+      if (fromEl) fromEl.addEventListener("change", applyRange);
+      if (toEl) toEl.addEventListener("change", applyRange);
+      var rs = ui.shadow.getElementById("hvReset");
+      if (rs) rs.addEventListener("click", function () { handoverRange = null; recomputeHandover(); });
+
       ui.handover.innerHTML =
         '<div class="sec-title">Translator productivity · ' + lastHandover.window +
         ' <span style="float:right">' +
@@ -258,6 +285,7 @@
         download("handover-pivot-" + stamp() + ".csv", LarkCore.buildHandoverCSV(lastHandover), "text/csv");
       });
     } else {
+      ui.rangeBar.innerHTML = "";
       ui.handover.innerHTML = "";
     }
 

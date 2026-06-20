@@ -11,6 +11,7 @@ var els = {
   filter: document.getElementById("filter"),
   status: document.getElementById("status"),
   summary: document.getElementById("summary"),
+  rangeBar: document.getElementById("rangeBar"),
   handover: document.getElementById("handover"),
   report: document.getElementById("report")
 };
@@ -87,6 +88,14 @@ async function load() {
 function render() {
   els.summary.innerHTML = LarkCore.renderSummary(analysis);
   if (handover) {
+    els.rangeBar.innerHTML = LarkCore.renderRangeControls(handover.range);
+    var fromEl = document.getElementById("hvFrom"), toEl = document.getElementById("hvTo");
+    function onRange() { applyRange(LarkCore.parseRangeControls(fromEl.value, toEl.value)); }
+    if (fromEl) fromEl.addEventListener("change", onRange);
+    if (toEl) toEl.addEventListener("change", onRange);
+    var rs = document.getElementById("hvReset");
+    if (rs) rs.addEventListener("click", function () { applyRange(null); });
+
     els.handover.innerHTML =
       '<div class="sec-title">Translator productivity · ' + handover.window +
       ' <span style="float:right"><button class="btn" id="copyPivot">📋 Copy for sheet</button> ' +
@@ -104,10 +113,26 @@ function render() {
       download("handover-pivot-" + stamp() + ".csv", LarkCore.buildHandoverCSV(handover), "text/csv");
     });
   } else {
+    els.rangeBar.innerHTML = "";
     els.handover.innerHTML = "";
   }
   els.report.innerHTML = LarkCore.renderFields(analysis, filterText);
   els.exportHtml.disabled = els.exportCsv.disabled = false;
+}
+
+// Send the chosen month range to the content script, which recomputes the pivot
+// (it holds the raw dataset). null range -> back to the default current quarter.
+async function applyRange(range) {
+  setStatus("Updating window…");
+  var tab = await activeTab();
+  var resp = tab && tab.id != null ? await sendToTab(tab.id, { type: "SET_HANDOVER_RANGE", range: range }) : null;
+  if (resp && resp.handover) {
+    handover = resp.handover;
+    render();
+    setStatus(analysis.rowCount.toLocaleString() + " rows × " + analysis.columns.length + " columns. Generated " + analysis.generatedAt + ".");
+  } else {
+    setStatus("Couldn't reach the Base page. Reload the Lark Base tab (so the latest extension loads), then try again.", true);
+  }
 }
 
 async function openOnPage() {

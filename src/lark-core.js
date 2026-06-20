@@ -418,6 +418,25 @@
   }
   function daysInMonth(y, m) { return new Date(Date.UTC(y, m, 0)).getUTCDate(); } // m is 1-based
 
+  var MAX_WINDOW_MONTHS = 24; // safety cap so a huge range can't produce thousands of day rows
+
+  // The CALENDAR QUARTER containing month p.m (Q1 Jan-Mar, Q2 Apr-Jun, Q3 Jul-Sep,
+  // Q4 Oct-Dec). A quarter is always within one year — used as the default window.
+  function quarterRange(p) {
+    var sm = Math.floor((p.m - 1) / 3) * 3 + 1; // first month of the quarter
+    return { fromYear: p.y, fromMonth: sm, toYear: p.y, toMonth: sm + 2 };
+  }
+
+  // Validate/clamp a month range: swap if from > to, then cap the span at
+  // MAX_WINDOW_MONTHS months (clamping the start forward, keeping the end fixed).
+  function normalizeRange(r) {
+    var a = r.fromYear * 12 + (r.fromMonth - 1);
+    var b = r.toYear * 12 + (r.toMonth - 1);
+    if (a > b) { var t = a; a = b; b = t; }
+    if (b - a > MAX_WINDOW_MONTHS - 1) a = b - (MAX_WINDOW_MONTHS - 1);
+    return { fromYear: Math.floor(a / 12), fromMonth: (a % 12) + 1, toYear: Math.floor(b / 12), toMonth: (b % 12) + 1 };
+  }
+
   function buildHandover(dataset, opts) {
     var f = detectHandover(dataset);
     if (!f) return null;
@@ -426,18 +445,25 @@
     var nowMs = (opts && opts.now) ? new Date(opts.now).getTime() : Date.now();
     var nowP = tzParts(nowMs, tz);
 
-    // The current CALENDAR QUARTER (Q1 Jan-Mar, Q2 Apr-Jun, Q3 Jul-Sep, Q4 Oct-Dec),
-    // in the base timezone. A quarter is always within one year.
-    var startMonth = Math.floor((nowP.m - 1) / 3) * 3 + 1; // first month of the quarter
+    // The window is an inclusive month range (1-based months), in the base timezone.
+    // Default = the current calendar quarter. Per-day rows, date-descending.
+    var rangeOpt = opts && opts.range;
+    var range = (rangeOpt && rangeOpt.fromYear && rangeOpt.fromMonth && rangeOpt.toYear && rangeOpt.toMonth)
+      ? normalizeRange(rangeOpt) : quarterRange(nowP);
+    var multiYear = range.fromYear !== range.toYear;
+
     var pivot = {}, persons = {}, windowKeys = [], inWin = {};
-    for (var mm = startMonth + 2; mm >= startMonth; mm--) {
-      var dim = daysInMonth(nowP.y, mm);
+    var y = range.toYear, mm = range.toMonth;
+    while (y > range.fromYear || (y === range.fromYear && mm >= range.fromMonth)) {
+      var dim = daysInMonth(y, mm);
       for (var d = dim; d >= 1; d--) {
-        var key = d + "-" + MON[mm - 1];
+        // Disambiguate identical day-month labels across years (e.g. "8-Jun-2025").
+        var key = d + "-" + MON[mm - 1] + (multiYear ? "-" + y : "");
         pivot[key] = {};
         windowKeys.push(key);
-        inWin[nowP.y + "-" + mm + "-" + d] = key;
+        inWin[y + "-" + mm + "-" + d] = key;
       }
+      mm--; if (mm < 1) { mm = 12; y--; }
     }
     pivot[IN_PROGRESS_KEY] = {};
     var STAGES = ["Translate", "Proofread", "Haibao"];
@@ -491,8 +517,36 @@
     return {
       persons: personList, stages: STAGES, dateKeys: dateKeys, pivot: pivot, totals: totals,
       rowCount: dataset.order.length,
-      window: windowKeys[windowKeys.length - 1] + " → " + windowKeys[0], timeZone: tz
+      window: windowKeys[windowKeys.length - 1] + " → " + windowKeys[0], range: range, timeZone: tz
     };
+  }
+
+  // ---- month-range picker helpers (shared by popup + on-page panel) ----
+
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  function monthInputValue(y, m) { return y + "-" + pad2(m); } // -> "YYYY-MM"
+  function parseMonthInput(str) {
+    var m = /^(\d{4})-(\d{2})$/.exec(String(str || ""));
+    if (!m) return null;
+    var mo = +m[2];
+    if (mo < 1 || mo > 12) return null;
+    return { year: +m[1], month: mo };
+  }
+  function parseRangeControls(fromStr, toStr) {
+    var a = parseMonthInput(fromStr), b = parseMonthInput(toStr);
+    if (!a || !b) return null;
+    return { fromYear: a.year, fromMonth: a.month, toYear: b.year, toMonth: b.month };
+  }
+  // HTML for the From/To month pickers; values seeded from the resolved range.
+  function renderRangeControls(range) {
+    var r = range || {};
+    var from = (r.fromYear && r.fromMonth) ? monthInputValue(r.fromYear, r.fromMonth) : "";
+    var to = (r.toYear && r.toMonth) ? monthInputValue(r.toYear, r.toMonth) : "";
+    return '<span class="rangebar-label">Productivity window:</span>' +
+      '<label>From <input type="month" id="hvFrom" class="month" value="' + from + '"></label>' +
+      '<span class="arrow">→</span>' +
+      '<label>To <input type="month" id="hvTo" class="month" value="' + to + '"></label>' +
+      '<button class="btn small" id="hvReset">Reset to quarter</button>';
   }
 
   // Full flat export of the resolved dataset (every record × every field).
@@ -559,6 +613,9 @@
     detectHandover: detectHandover,
     buildHandover: buildHandover,
     renderHandover: renderHandover,
+    renderRangeControls: renderRangeControls,
+    parseRangeControls: parseRangeControls,
+    monthInputValue: monthInputValue,
     buildHandoverCSV: buildHandoverCSV,
     buildHandoverTSV: buildHandoverTSV,
     buildRawCSV: buildRawCSV,
