@@ -379,6 +379,13 @@
     uiStatus: ["UI-Design Review Status", "UI Review Status"]
   };
   var IN_PROGRESS_KEY = "Task in progress";
+  var CANCELED_KEY = "Task Canceled";
+  // Candidate names for the record creation time. NOTE: a field may be NAMED like a
+  // creation time but actually be a broken text/formula constant (seen in real data:
+  // a "创建时间" field holding the same number for every row) — so we only accept a
+  // candidate that is genuinely a DATE-typed field (5 = date, 1001/1002 = auto times).
+  var CREATED_NAMES = ["Creation Time", "Created Time", "Created time", "创建时间", "建立时间"];
+  var DATE_TYPES = { 5: 1, 1001: 1, 1002: 1 };
 
   function findFieldId(dataset, names) {
     for (var i = 0; i < names.length; i++) {
@@ -388,9 +395,43 @@
     return null;
   }
 
+  // Does a field actually hold ms-timestamp values? (Rejects the broken "创建时间"
+  // constant "1781801208", which parses to no valid date.)
+  function looksLikeDateField(dataset, fieldId) {
+    var order = dataset.order || [], seen = 0, dates = 0;
+    for (var i = 0; i < order.length && seen < 40; i++) {
+      var v = (dataset.recordsById[order[i]] || {})[fieldId];
+      if (v == null || v === "") continue;
+      seen++;
+      var ms = (typeof v === "number") ? v : Date.parse(v);
+      if (!isNaN(ms) && ms > 1e11 && ms < 4e12) dates++;
+    }
+    return seen > 0 && dates >= seen * 0.6;
+  }
+
+  // Record creation time, resolved to a field that genuinely holds dates:
+  // 1) an explicitly-named creation field that is date-typed OR holds date values,
+  // 2) else the Lark auto "Created Time" field (type 1001) under any name,
+  // 3) else any creation-hinted field that holds date values.
+  function findCreatedField(dataset) {
+    for (var i = 0; i < CREATED_NAMES.length; i++) {
+      var named = dataset.fields.filter(function (x) { return x.name === CREATED_NAMES[i]; });
+      for (var j = 0; j < named.length; j++) {
+        if (DATE_TYPES[named[j].type] || looksLikeDateField(dataset, named[j].id)) return named[j].id;
+      }
+    }
+    var auto = dataset.fields.filter(function (x) { return x.type === 1001; })[0];
+    if (auto) return auto.id;
+    var hint = dataset.fields.filter(function (x) {
+      return /创建|建立|created|creation/i.test(x.name) && (DATE_TYPES[x.type] || looksLikeDateField(dataset, x.id));
+    })[0];
+    return hint ? hint.id : null;
+  }
+
   function detectHandover(dataset) {
     var ids = {};
     Object.keys(HANDOVER_FIELDS).forEach(function (k) { ids[k] = findFieldId(dataset, HANDOVER_FIELDS[k]); });
+    ids.created = findCreatedField(dataset);
     return (ids.translator && ids.proofreader && ids.wc) ? ids : null;
   }
 
@@ -407,6 +448,7 @@
 
   function isCompleted(v) { return String(v == null ? "" : v).trim().toLowerCase() === "completed"; }
   function isInProgress(v) { return String(v == null ? "" : v).trim().toLowerCase() === "in progress"; }
+  function isCanceled(v) { var s = String(v == null ? "" : v).trim().toLowerCase(); return /^cancel/.test(s) || s === "取消" || s === "已取消"; }
 
   // Calendar parts (year/month/day) of a timestamp AS SEEN in a given timezone.
   // Lark buckets dates by the base timezone (e.g. Asia/Saigon), not the browser's.
@@ -465,6 +507,7 @@
       }
       mm--; if (mm < 1) { mm = 12; y--; }
     }
+    pivot[CANCELED_KEY] = {};
     pivot[IN_PROGRESS_KEY] = {};
     var STAGES = ["Translate", "Proofread", "Haibao"];
 
@@ -476,33 +519,53 @@
       pivot[key][person][stage] = (pivot[key][person][stage] || 0) + amt;
     }
 
-    // Each stage counts only when ITS status is Completed and the completion date
-    // (in base tz) is inside the window. In-Progress -> "Task in progress" row.
+    // Map a timestamp (ms, or a parseable date string) to its in-window day key, or null.
+    function winKeyOf(raw) {
+      var ms = (typeof raw === "number") ? raw : (raw ? Date.parse(raw) : NaN);
+      if (isNaN(ms)) return null;
+      var p = tzParts(ms, tz);
+      return inWin[p.y + "-" + p.m + "-" + p.d] || null;
+    }
+
     dataset.order.forEach(function (id) {
       var r = dataset.recordsById[id] || {};
       var wc = toNum(r[f.wc]), uiwc = f.uiwc ? toNum(r[f.uiwc]) : 0;
-      var doneRaw = f.done ? r[f.done] : null;
-      var ms = (typeof doneRaw === "number") ? doneRaw : (doneRaw ? Date.parse(doneRaw) : NaN);
-      var winKey = null;
-      if (!isNaN(ms)) { var p = tzParts(ms, tz); winKey = inWin[p.y + "-" + p.m + "-" + p.d] || null; }
+      var translators = splitPersons(r[f.translator]);
+      var proofreaders = splitPersons(r[f.proofreader]);
 
-      function stageKey(statusFieldId) {
-        var s = statusFieldId ? r[statusFieldId] : null;
-        if (statusFieldId && isInProgress(s)) return IN_PROGRESS_KEY;
-        var completed = statusFieldId ? isCompleted(s) : true;
-        return completed ? winKey : null; // completed but outside window -> excluded
+      // Special rows ("Task in progress" / "Task Canceled") are keyed off the
+      // Translation Status and filtered by CREATION time (创建时间), not completion.
+      // Each credits its Word Count to both the Translator and the Proofreader.
+      var ts = f.transStatus ? r[f.transStatus] : null;
+      var inProg = isInProgress(ts), canceled = isCanceled(ts);
+      if (inProg || canceled) {
+        var createdIn = f.created ? winKeyOf(r[f.created]) : "all"; // no created field -> count all
+        if (createdIn) {
+          var specialKey = canceled ? CANCELED_KEY : IN_PROGRESS_KEY;
+          translators.forEach(function (p) { add(specialKey, p, "Translate", wc); });
+          proofreaders.forEach(function (p) { add(specialKey, p, "Proofread", wc); });
+        }
+        return; // in-progress/canceled tasks don't contribute to the completed day rows
       }
 
-      var kT = stageKey(f.transStatus);
-      var kP = stageKey(f.proofStatus);
-      var kH = stageKey(f.uiStatus);
-      splitPersons(r[f.translator]).forEach(function (p) { add(kT, p, "Translate", wc); });
-      splitPersons(r[f.proofreader]).forEach(function (p) { add(kP, p, "Proofread", wc); });
+      // Day rows: each stage counts only when ITS status is Completed and the
+      // completion date (in base tz) is inside the window.
+      var winKey = winKeyOf(f.done ? r[f.done] : null);
+      function dayKey(statusFieldId) {
+        var completed = statusFieldId ? isCompleted(r[statusFieldId]) : true;
+        return completed ? winKey : null; // completed but outside window -> excluded
+      }
+      var kT = dayKey(f.transStatus);
+      var kP = dayKey(f.proofStatus);
+      var kH = dayKey(f.uiStatus);
+      translators.forEach(function (p) { add(kT, p, "Translate", wc); });
+      proofreaders.forEach(function (p) { add(kP, p, "Proofread", wc); });
       if (f.reviewer) splitPersons(r[f.reviewer]).forEach(function (p) { add(kH, p, "Haibao", uiwc); });
     });
 
     var personList = Object.keys(persons).sort();
-    var dateKeys = [IN_PROGRESS_KEY].concat(windowKeys); // in-progress row first, then dates desc
+    // Canceled + in-progress rows first (above the daily breakdown), then dates desc.
+    var dateKeys = [CANCELED_KEY, IN_PROGRESS_KEY].concat(windowKeys);
 
     var totals = {};
     personList.forEach(function (p) {
@@ -518,6 +581,44 @@
       persons: personList, stages: STAGES, dateKeys: dateKeys, pivot: pivot, totals: totals,
       rowCount: dataset.order.length,
       window: windowKeys[windowKeys.length - 1] + " → " + windowKeys[0], range: range, timeZone: tz
+    };
+  }
+
+  // Diagnostic: explains why the in-progress / canceled rows may be empty. Reports
+  // the detected status & creation fields, the distinct status values, how many
+  // records match each status, whether they have a Word Count, and the months they
+  // were CREATED in (so you can see whether they fall inside the selected window).
+  function diagnoseHandover(dataset, opts) {
+    var f = detectHandover(dataset);
+    if (!f) return { error: "Translator / Proofreader / Word Count fields not detected" };
+    var tz = (opts && opts.timeZone) || (dataset && dataset.timeZone) || "UTC";
+    function nameOf(id) { var x = dataset.fields.filter(function (z) { return z.id === id; })[0]; return x ? x.name : null; }
+    var statusCounts = {}, matched = { inProgress: 0, canceled: 0 }, wcPos = { inProgress: 0, canceled: 0 }, createdMonths = {};
+    dataset.order.forEach(function (id) {
+      var r = dataset.recordsById[id] || {};
+      var v = f.transStatus ? r[f.transStatus] : null;
+      var sk = (v == null || v === "") ? "(empty)" : String(v);
+      statusCounts[sk] = (statusCounts[sk] || 0) + 1;
+      var which = isCanceled(v) ? "canceled" : (isInProgress(v) ? "inProgress" : null);
+      if (!which) return;
+      matched[which]++;
+      if (toNum(r[f.wc]) > 0) wcPos[which]++;
+      var raw = f.created ? r[f.created] : null;
+      var ms = (typeof raw === "number") ? raw : (raw ? Date.parse(raw) : NaN);
+      var ym = isNaN(ms) ? "(no creation date)" : (function () { var p = tzParts(ms, tz); return p.y + "-" + (p.m < 10 ? "0" : "") + p.m; })();
+      createdMonths[ym] = (createdMonths[ym] || 0) + 1;
+    });
+    var top = Object.keys(statusCounts).sort(function (a, b) { return statusCounts[b] - statusCounts[a]; })
+      .slice(0, 15).map(function (k) { return k + " ×" + statusCounts[k]; });
+    return {
+      rowsLoaded: dataset.order.length,
+      statusField: nameOf(f.transStatus),
+      statusValuesTop: top,
+      matchedInProgress: matched.inProgress, matchedCanceled: matched.canceled,
+      ofThoseWithWordCount: { inProgress: wcPos.inProgress, canceled: wcPos.canceled },
+      creationField: nameOf(f.created),
+      creationSampleValue: f.created && dataset.order.length ? dataset.recordsById[dataset.order[0]][f.created] : null,
+      createdMonthsOfMatched: createdMonths
     };
   }
 
@@ -612,6 +713,7 @@
     FIELD_TYPE: FIELD_TYPE,
     detectHandover: detectHandover,
     buildHandover: buildHandover,
+    diagnoseHandover: diagnoseHandover,
     renderHandover: renderHandover,
     renderRangeControls: renderRangeControls,
     parseRangeControls: parseRangeControls,

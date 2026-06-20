@@ -74,6 +74,7 @@
     lastDataset = dataset;
     lastAnalysis = LarkCore.buildAnalysis(dataset, location.href);
     lastHandover = LarkCore.buildHandover(dataset, { timeZone: state.timeZone, range: handoverRange }); // null unless work-log table
+    try { if (lastHandover) console.log("[Lark Analytics] handover diagnosis:", JSON.stringify(LarkCore.diagnoseHandover(dataset, { timeZone: state.timeZone, range: handoverRange }), null, 2)); } catch (e) {}
     try {
       chrome.storage.local.set({ larkAnalysis: lastAnalysis, larkHandover: lastHandover, larkUrl: location.href, larkAt: Date.now() });
     } catch (e) {}
