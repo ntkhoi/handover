@@ -595,32 +595,26 @@
         if (bannerIn) splitPersons(r[f.reviewer]).forEach(function (p) { add(BANNER_KEY, p, "Proofread", uiwc); });
       }
 
-      // Special rows ("Task in progress" / "Task Canceled") are keyed off the
-      // Translation Status and filtered by CREATION time (创建时间), not completion.
-      // Each credits its Word Count to both the Translator and the Proofreader.
-      var ts = f.transStatus ? r[f.transStatus] : null;
-      var inProg = isInProgress(ts), canceled = isCanceled(ts);
-      if (inProg || canceled) {
-        var createdIn = f.created ? winKeyOf(r[f.created]) : "all"; // no created field -> count all
-        if (createdIn) {
-          var specialKey = canceled ? CANCELED_KEY : IN_PROGRESS_KEY;
-          translators.forEach(function (p) { add(specialKey, p, "Translate", wc); });
-          proofreaders.forEach(function (p) { add(specialKey, p, "Proofread", wc); });
-        }
-        return; // in-progress/canceled tasks don't contribute to the completed day rows
-      }
-
-      // Day rows: each stage counts only when ITS status is Completed and the
-      // completion date (in base tz) is inside the window.
+      // Each stage is routed INDEPENDENTLY by ITS OWN status field:
+      //  - In progress / Canceled  -> the special summary rows, filtered by CREATION
+      //    time (创建时间) being inside the window.
+      //  - Completed                -> the per-day rows, filtered by the COMPLETION date.
+      // So a record whose Translation is completed but Proofreading is still in
+      // progress contributes to the day row (Translate) AND the in-progress row
+      // (Proofread) at once — each column reflects only its own stage's status.
+      var createdIn = f.created ? winKeyOf(r[f.created]) : "all"; // no created field -> count all
       var winKey = winKeyOf(f.done ? r[f.done] : null);
-      function dayKey(statusFieldId) {
-        var completed = statusFieldId ? isCompleted(r[statusFieldId]) : true;
-        return completed ? winKey : null; // completed but outside window -> excluded
+      function route(persons, statusFieldId, stage) {
+        if (!persons.length) return;
+        var status = statusFieldId ? r[statusFieldId] : null;
+        var key = null;
+        if (isInProgress(status)) key = createdIn ? IN_PROGRESS_KEY : null;
+        else if (isCanceled(status)) key = createdIn ? CANCELED_KEY : null;
+        else if (statusFieldId ? isCompleted(status) : true) key = winKey; // outside window -> null
+        if (key) persons.forEach(function (p) { add(key, p, stage, wc); });
       }
-      var kT = dayKey(f.transStatus);
-      var kP = dayKey(f.proofStatus);
-      translators.forEach(function (p) { add(kT, p, "Translate", wc); });
-      proofreaders.forEach(function (p) { add(kP, p, "Proofread", wc); });
+      route(translators, f.transStatus, "Translate");
+      route(proofreaders, f.proofStatus, "Proofread");
       // Haibao day data intentionally not populated — the column stays (header +
       // 0 total) but holds no values. UI-review word count now feeds the Banner row.
     });
