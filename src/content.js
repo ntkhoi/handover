@@ -14,6 +14,8 @@
   var lastDataset = null;
   var handoverRange = null; // null = current-quarter default; set by the From/To pickers
   var loadingAll = false;
+  var autoLoadKey = null;   // records-URL signature already auto-loaded (or loading); re-fires on table/view switch
+  var autoLoadTimer = null;
   var panelOpenedOnce = false;
   var computeTimer = null;
   var filterText = "";
@@ -23,7 +25,7 @@
   window.addEventListener("message", function (ev) {
     var d = ev.data;
     if (!d || d.source !== "lark-analytics-interceptor") return;
-    if (d.type === "request") { recordsReq = { url: String(d.url || ""), headers: d.headers || {} }; return; }
+    if (d.type === "request") { recordsReq = { url: String(d.url || ""), headers: d.headers || {} }; scheduleAutoLoadAll(); return; }
     if (d.type !== "capture") return;
     var json;
     try { json = JSON.parse(d.body); } catch (e) { return; }
@@ -37,7 +39,8 @@
         if (!cv) return;
         if (cv.fieldMap) state.fieldMap = cv.fieldMap;
         if (cv.userMap) state.userMap = cv.userMap;
-        if (cv.timeZone) state.timeZone = cv.timeZone;
+        // Lark's reported table timezone is intentionally ignored: date bucketing is
+        // pinned to UTC+8 in lark-core (BASE_TZ), not the table's zone or the browser's.
         if (cv.recordMap && !state.recordMap) { state.recordMap = cv.recordMap; state.order = cv.order; }
         scheduleCompute();
       }).catch(function () {});
@@ -73,8 +76,8 @@
     if (!dataset.order.length) return;
     lastDataset = dataset;
     lastAnalysis = LarkCore.buildAnalysis(dataset, location.href);
-    lastHandover = LarkCore.buildHandover(dataset, { timeZone: state.timeZone, range: handoverRange }); // null unless work-log table
-    try { if (lastHandover) console.log("[Lark Analytics] handover diagnosis:", JSON.stringify(LarkCore.diagnoseHandover(dataset, { timeZone: state.timeZone, range: handoverRange }), null, 2)); } catch (e) {}
+    lastHandover = LarkCore.buildHandover(dataset, { range: handoverRange }); // null unless work-log table
+    try { if (lastHandover) console.log("[Lark Analytics] handover diagnosis:", JSON.stringify(LarkCore.diagnoseHandover(dataset, { range: handoverRange }), null, 2)); } catch (e) {}
     try {
       chrome.storage.local.set({ larkAnalysis: lastAnalysis, larkHandover: lastHandover, larkUrl: location.href, larkAt: Date.now() });
     } catch (e) {}
@@ -93,16 +96,43 @@
     return out;
   }
 
+  // ---- auto-load: by default pull EVERY row, so the pivot is never partial ----
+  // Fires once per table/view the moment the records-request template is captured,
+  // and again whenever the user switches table/view (the records URL changes).
+  function recordsSignature(url) {
+    try {
+      var u = new URL(url, location.origin);
+      ["offset", "limit", "viewLazyLoad"].forEach(function (k) { u.searchParams.delete(k); });
+      return u.pathname + "?" + u.searchParams.toString();
+    } catch (e) { return String(url || ""); }
+  }
+  function scheduleAutoLoadAll() {
+    if (!recordsReq) return;
+    if (recordsSignature(recordsReq.url) === autoLoadKey) return; // this table/view already handled
+    if (autoLoadTimer) clearTimeout(autoLoadTimer);
+    // Small delay so the page's own initial requests settle and LarkCore is ready.
+    autoLoadTimer = setTimeout(function () {
+      if (!recordsReq) return;
+      var sig = recordsSignature(recordsReq.url);
+      if (sig === autoLoadKey) return;
+      if (!window.LarkCore || loadingAll) { autoLoadTimer = setTimeout(scheduleAutoLoadAll, 500); return; }
+      autoLoadKey = sig;
+      loadAllRecords();
+    }, 800);
+  }
+
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
   function loadAllRecords() {
-    if (loadingAll || !recordsReq || !window.LarkCore) return;
+    if (loadingAll || !recordsReq || !window.LarkCore) return Promise.resolve();
     loadingAll = true;
     setPanelStatus("Loading all rows…");
     var headers = safeHeaders(recordsReq.headers);
     var limit = 3000;
     var merged = {}, order = [], seen = {};
 
-    function fetchPage(offset, total) {
-      if (offset >= total) return Promise.resolve();
+    // Fetch one page, retrying a few times so a transient network blip never drops rows.
+    function getPage(offset, attempt) {
       var u = new URL(recordsReq.url, location.origin);
       u.searchParams.set("offset", String(offset));
       u.searchParams.set("limit", String(limit));
@@ -110,24 +140,46 @@
       return fetch(u.toString(), { credentials: "include", headers: headers })
         .then(function (res) { if (!res.ok) throw new Error("HTTP " + res.status); return res.json(); })
         .then(function (json) { return LarkCore.extractRecords(json); })
-        .then(function (rc) {
-          if (!rc || !rc.recordMap) return;
-          var ids = Object.keys(rc.recordMap);
-          if (!ids.length) return;
-          ids.forEach(function (id) { merged[id] = rc.recordMap[id]; if (!seen[id]) { order.push(id); seen[id] = 1; } });
-          var newTotal = rc.total || total;
-          setPanelStatus("Loaded " + order.length + (newTotal < Infinity ? " / " + newTotal : "") + " rows…");
-          if (ids.length < limit) return;            // last page
-          return fetchPage(offset + limit, newTotal);
+        .catch(function (e) {
+          if ((attempt || 0) >= 3) throw e;
+          return wait(500 * ((attempt || 0) + 1)).then(function () { return getPage(offset, (attempt || 0) + 1); });
         });
     }
 
-    fetchPage(0, state.total || Infinity).then(function () {
-      if (order.length) { state.recordMap = merged; state.order = order; compute(); }
-      setPanelStatus("");
+    // Page until we've collected the table's OWN reported row count (tableRecordNum).
+    // Advance by the rows ACTUALLY returned — Lark caps a response below the requested
+    // `limit`, so stepping by a fixed `limit` would silently skip every gap.
+    function fetchFrom(offset, total, page) {
+      if (page > 5000) return total; // backstop against a server that ignores offset
+      return getPage(offset, 0).then(function (rc) {
+        if (!rc || !rc.recordMap) return total;
+        var ids = Object.keys(rc.recordMap);
+        if (!ids.length) return total;                 // empty page -> genuinely no more rows
+        var added = 0;
+        ids.forEach(function (id) {
+          merged[id] = rc.recordMap[id];
+          if (!seen[id]) { order.push(id); seen[id] = 1; added++; }
+        });
+        var newTotal = rc.total || total;
+        setPanelStatus("Loaded " + order.length + (newTotal < Infinity ? " / " + newTotal : "") + " rows…");
+        if (newTotal < Infinity && order.length >= newTotal) return newTotal; // have everything
+        if (added === 0) return newTotal;              // no new rows -> stop (server ignored offset)
+        return fetchFrom(offset + ids.length, newTotal, page + 1);
+      });
+    }
+
+    return fetchFrom(0, state.total || Infinity, 0).then(function (total) {
+      if (order.length) { state.recordMap = merged; state.order = order; if (total < Infinity) state.total = total; compute(); }
+      if (total < Infinity && order.length < total) {
+        // Surface incompleteness instead of silently presenting a short pivot.
+        setPanelStatus("⚠ Loaded " + order.length + " of " + total + " rows — data may be incomplete. Reload the page and try again.");
+      } else {
+        setPanelStatus("");
+      }
       loadingAll = false;
     }).catch(function (e) {
-      setPanelStatus("Couldn't auto-load all rows (" + e.message + "). Try scrolling the table instead.");
+      autoLoadKey = null; // allow auto-load to retry on the next captured request
+      setPanelStatus("Couldn't auto-load all rows (" + e.message + "). Showing rows captured so far.");
       loadingAll = false;
     });
   }
@@ -139,7 +191,7 @@
   // change shouldn't pop the panel open on the page.
   function recomputeHandover() {
     if (!lastDataset || !window.LarkCore) return;
-    lastHandover = LarkCore.buildHandover(lastDataset, { timeZone: state.timeZone, range: handoverRange });
+    lastHandover = LarkCore.buildHandover(lastDataset, { range: handoverRange });
     try { chrome.storage.local.set({ larkHandover: lastHandover }); } catch (e) {}
     if (ui) renderPanel();
   }

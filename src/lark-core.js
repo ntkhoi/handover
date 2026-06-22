@@ -503,6 +503,14 @@
   function isInProgress(v) { return String(v == null ? "" : v).trim().toLowerCase() === "in progress"; }
   function isCanceled(v) { var s = String(v == null ? "" : v).trim().toLowerCase(); return /^cancel/.test(s) || s === "取消" || s === "已取消"; }
 
+  // All date bucketing is pinned to UTC+8. Lark stores each cell as an absolute
+  // epoch instant, so the calendar day a record falls on depends entirely on the
+  // timezone we read it in -- we fix that to UTC+8 (Asia/Singapore: no DST, +08:00
+  // year-round) instead of trusting the table's reported zone or the browser's.
+  var BASE_TZ = "Asia/Singapore"; // UTC+8 (IANA zone used for the actual Intl date math)
+  var BASE_TZ_LABEL = "UTC+8";    // human-facing label shown in the banner/report
+  function tzLabel(tz) { return tz === BASE_TZ ? BASE_TZ_LABEL : tz; }
+
   // Calendar parts (year/month/day) of a timestamp AS SEEN in a given timezone.
   // Lark buckets dates by the base timezone (e.g. Asia/Saigon), not the browser's.
   function tzParts(ms, tz) {
@@ -535,8 +543,7 @@
   function buildHandover(dataset, opts) {
     var f = detectHandover(dataset);
     if (!f) return null;
-    var tz = (opts && opts.timeZone) || (dataset && dataset.timeZone);
-    if (!tz) { try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { tz = "UTC"; } }
+    var tz = (opts && opts.timeZone) || BASE_TZ; // pinned to UTC+8 unless explicitly overridden
     var nowMs = (opts && opts.now) ? new Date(opts.now).getTime() : Date.now();
     var nowP = tzParts(nowMs, tz);
 
@@ -595,26 +602,43 @@
         if (bannerIn) splitPersons(r[f.reviewer]).forEach(function (p) { add(BANNER_KEY, p, "Proofread", uiwc); });
       }
 
-      // Each stage is routed INDEPENDENTLY by ITS OWN status field:
+      // Each stage is routed by ITS OWN status field:
       //  - In progress / Canceled  -> the special summary rows, filtered by CREATION
       //    time (创建时间) being inside the window.
       //  - Completed                -> the per-day rows, filtered by the COMPLETION date.
-      // So a record whose Translation is completed but Proofreading is still in
-      // progress contributes to the day row (Translate) AND the in-progress row
-      // (Proofread) at once — each column reflects only its own stage's status.
+      // EXCEPTION (Translate only): a completed translation feeds the per-day rows
+      // (and totals) only once Proofreading is PAST. While Proofreading is still in
+      // progress the task isn't delivered -> the completed Translation is routed to
+      // the in-progress summary row; if Proofreading was canceled the task is never
+      // delivered -> it is routed to the Task Canceled row. Either way the
+      // translator's completed total excludes it, and the record shows under both
+      // Translate AND Proofread in that same summary row.
       var createdIn = f.created ? winKeyOf(r[f.created]) : "all"; // no created field -> count all
       var winKey = winKeyOf(f.done ? r[f.done] : null);
-      function route(persons, statusFieldId, stage) {
+      var proofStatusVal = f.proofStatus ? r[f.proofStatus] : null;
+      var proofInProgress = isInProgress(proofStatusVal);
+      var proofCanceled = isCanceled(proofStatusVal);
+      function route(persons, statusFieldId, stage, gateOnProof) {
         if (!persons.length) return;
         var status = statusFieldId ? r[statusFieldId] : null;
         var key = null;
         if (isInProgress(status)) key = createdIn ? IN_PROGRESS_KEY : null;
         else if (isCanceled(status)) key = createdIn ? CANCELED_KEY : null;
-        else if (statusFieldId ? isCompleted(status) : true) key = winKey; // outside window -> null
+        else if (statusFieldId ? isCompleted(status) : true) {
+          // Completed: normally a per-day row, BUT a completed translation only
+          // counts as a delivered completion once it's PAST proofreading. If
+          // proofreading is still in progress the task isn't delivered yet; if
+          // proofreading was canceled the task is never delivered -> route to the
+          // in-progress / canceled summary row (filtered by creation time, like
+          // every other summary-row entry). Outside window -> null.
+          key = (gateOnProof && proofInProgress) ? (createdIn ? IN_PROGRESS_KEY : null)
+              : (gateOnProof && proofCanceled)   ? (createdIn ? CANCELED_KEY : null)
+              : winKey;
+        }
         if (key) persons.forEach(function (p) { add(key, p, stage, wc); });
       }
-      route(translators, f.transStatus, "Translate");
-      route(proofreaders, f.proofStatus, "Proofread");
+      route(translators, f.transStatus, "Translate", true);
+      route(proofreaders, f.proofStatus, "Proofread", false);
       // Haibao day data intentionally not populated — the column stays (header +
       // 0 total) but holds no values. UI-review word count now feeds the Banner row.
     });
@@ -636,7 +660,7 @@
     return {
       persons: personList, stages: STAGES, dateKeys: dateKeys, pivot: pivot, totals: totals,
       rowCount: dataset.order.length,
-      window: windowKeys[windowKeys.length - 1] + " → " + windowKeys[0], range: range, timeZone: tz
+      window: windowKeys[windowKeys.length - 1] + " → " + windowKeys[0], range: range, timeZone: tzLabel(tz)
     };
   }
 
@@ -647,7 +671,7 @@
   function diagnoseHandover(dataset, opts) {
     var f = detectHandover(dataset);
     if (!f) return { error: "Translator / Proofreader / Word Count fields not detected" };
-    var tz = (opts && opts.timeZone) || (dataset && dataset.timeZone) || "UTC";
+    var tz = (opts && opts.timeZone) || BASE_TZ; // pinned to UTC+8 unless explicitly overridden
     function nameOf(id) { var x = dataset.fields.filter(function (z) { return z.id === id; })[0]; return x ? x.name : null; }
     var statusCounts = {}, matched = { inProgress: 0, canceled: 0 }, wcPos = { inProgress: 0, canceled: 0 }, createdMonths = {};
     dataset.order.forEach(function (id) {
